@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Jellyfin.Plugin.Federation</RootNamespace>
+    <AssemblyName>Jellyfin.Plugin.Federation</AssemblyName>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../jellyfin/MediaBrowser.Controller/MediaBrowser.Controller.csproj">
+      <Private>false</Private>
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </ProjectReference>
+    <ProjectReference Include="../jellyfin/MediaBrowser.Model/MediaBrowser.Model.csproj">
+      <Private>false</Private>
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </ProjectReference>
+    <ProjectReference Include="../jellyfin/MediaBrowser.Common/MediaBrowser.Common.csproj">
+      <Private>false</Private>
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </ProjectReference>
+    <ProjectReference Include="../jellyfin/src/Jellyfin.Extensions/Jellyfin.Extensions.csproj">
+      <Private>false</Private>
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </ProjectReference>
+  </ItemGroup>
+  <ItemGroup>
+    <!-- The container/ project compiles the same sources against image
+         binaries: keep its generated files out of this project's glob. -->
+    <Compile Remove="tests/**/*.cs" />
+    <Compile Remove="container/**/*.cs" />
+    <None Remove="tests/**" />
+    <None Remove="container/**" />
+  </ItemGroup>
+</Project>

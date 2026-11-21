@@ -1,0 +1,53 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Jellyfin.Plugin.Federation</RootNamespace>
+    <AssemblyName>Jellyfin.Plugin.Federation</AssemblyName>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../src/**/*.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- The exact binaries shipped in the linuxserver/jellyfin 12.2.0 container.
+         Not copied into the output: the container provides them at runtime.
+         Extract from a running container, one per assembly, e.g. (linuxserver image):
+           docker cp jellyfin:/usr/lib/jellyfin/bin/MediaBrowser.Controller.dll container-refs/controller.dll
+           docker cp jellyfin:/usr/lib/jellyfin/bin/MediaBrowser.Model.dll container-refs/model.dll
+         (see AGENTS.md, "Building for a container install") -->
+    <Reference Include="MediaBrowser.Controller">
+      <HintPath>../container-refs/controller.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="MediaBrowser.Model">
+      <HintPath>../container-refs/model.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="MediaBrowser.Common">
+      <HintPath>../container-refs/common.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Jellyfin.Extensions">
+      <HintPath>../container-refs/extensions.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Jellyfin.Data">
+      <HintPath>../container-refs/data.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Microsoft.Extensions.Logging.Abstractions">
+      <HintPath>../container-refs/Logging.Abstractions.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Microsoft.Extensions.DependencyInjection.Abstractions">
+      <HintPath>../container-refs/DependencyInjection.Abstractions.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+</Project>

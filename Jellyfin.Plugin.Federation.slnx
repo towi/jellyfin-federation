@@ -1,0 +1,15 @@
+<Solution>
+  <Folder Name="/tests/">
+    <Project Path="tests/Jellyfin.Plugin.Federation.Tests/Jellyfin.Plugin.Federation.Tests.csproj" />
+  </Folder>
+  <Project Path="../jellyfin/Emby.Naming/Emby.Naming.csproj" />
+  <Project Path="../jellyfin/Jellyfin.Data/Jellyfin.Data.csproj" />
+  <Project Path="../jellyfin/MediaBrowser.Common/MediaBrowser.Common.csproj" />
+  <Project Path="../jellyfin/MediaBrowser.Controller/MediaBrowser.Controller.csproj" />
+  <Project Path="../jellyfin/MediaBrowser.Model/MediaBrowser.Model.csproj" />
+  <Project Path="../jellyfin/src/Jellyfin.CodeAnalysis/Jellyfin.CodeAnalysis.csproj" />
+  <Project Path="../jellyfin/src/Jellyfin.Database/Jellyfin.Database.Implementations/Jellyfin.Database.Implementations.csproj" />
+  <Project Path="../jellyfin/src/Jellyfin.Extensions/Jellyfin.Extensions.csproj" />
+  <Project Path="../jellyfin/src/Jellyfin.MediaEncoding.Keyframes/Jellyfin.MediaEncoding.Keyframes.csproj" />
+  <Project Path="Jellyfin.Plugin.Federation.csproj" />
+</Solution>

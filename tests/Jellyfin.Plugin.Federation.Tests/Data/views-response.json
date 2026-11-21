@@ -1,0 +1,40 @@
+{
+  "Items": [
+    {
+      "Id": "f1e2d3c4b5a60718293a4b5c6d7e8f90",
+      "Name": "Filme",
+      "Type": "CollectionFolder",
+      "IsFolder": true,
+      "CollectionType": "movies"
+    },
+    {
+      "Id": "f1e2d3c4b5a60718293a4b5c6d7e8f91",
+      "Name": "Serien",
+      "Type": "CollectionFolder",
+      "IsFolder": true,
+      "CollectionType": "tvshows"
+    },
+    {
+      "Id": "f1e2d3c4b5a60718293a4b5c6d7e8f92",
+      "Name": "Musik",
+      "Type": "CollectionFolder",
+      "IsFolder": true,
+      "CollectionType": "music"
+    },
+    {
+      "Id": "f1e2d3c4b5a60718293a4b5c6d7e8f93",
+      "Name": "Playlists",
+      "Type": "CollectionFolder",
+      "IsFolder": true,
+      "CollectionType": "playlists"
+    },
+    {
+      "Id": "f1e2d3c4b5a60718293a4b5c6d7e8f94",
+      "Name": "Unsortiert",
+      "Type": "CollectionFolder",
+      "IsFolder": true
+    }
+  ],
+  "TotalRecordCount": 5,
+  "StartIndex": 0
+}

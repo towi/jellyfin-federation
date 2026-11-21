@@ -1,0 +1,8 @@
+{
+  "User": {
+    "Id": "7a0b0e34-1234-4321-b2c3-d4e5f6071829",
+    "Name": "paul"
+  },
+  "AccessToken": "remote-access-token-xyz",
+  "ServerId": "1f4d2e6e-9a0b-4c1d-8e2f-3a4b5c6d7e8f"
+}
