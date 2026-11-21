@@ -1,5 +1,7 @@
 using System;
 using System.IO;
+using System.Linq;
+using System.Text.Json;
 using Jellyfin.Plugin.Federation.Configuration;
 using MediaBrowser.Controller;
 using MediaBrowser.Common.Configuration;
@@ -17,6 +19,10 @@ namespace Jellyfin.Plugin.Federation;
 /// </summary>
 public class FederationPluginServiceRegistrator : IPluginServiceRegistrator
 {
+    private const string ConfigFileName = "Jellyfin.Plugin.Federation.xml";
+    private const string EnvConfigPath = "FEDERATION_CONFIG";
+    private const string EnvInstances = "FEDERATION_INSTANCES";
+
     /// <inheritdoc />
     public void RegisterServices(IServiceCollection serviceCollection, IServerApplicationHost applicationHost)
     {
@@ -67,8 +73,7 @@ public class FederationPluginServiceRegistrator : IPluginServiceRegistrator
     }
 
     /// <summary>
-    /// Loads the plugin configuration from the plugin configurations directory
-    /// ({ProgramDataPath}/plugins/configurations) without touching <see cref="Plugin.Instance"/>
+    /// Loads the plugin configuration without touching <see cref="Plugin.Instance"/>
     /// or host services that are not available during registration.
     /// </summary>
     /// <param name="appPaths">Application paths.</param>
@@ -76,7 +81,23 @@ public class FederationPluginServiceRegistrator : IPluginServiceRegistrator
     /// <returns>The deserialized configuration, or defaults when missing or broken.</returns>
     internal static PluginConfiguration LoadConfig(IApplicationPaths appPaths, ILogger logger)
     {
-        var path = Path.Combine(appPaths.PluginConfigurationsPath, "Jellyfin.Plugin.Federation.xml");
+        var config = LoadConfigFile(appPaths, logger);
+        var instancesFromEnv = Environment.GetEnvironmentVariable(EnvInstances);
+        if (!string.IsNullOrWhiteSpace(instancesFromEnv))
+        {
+            // Environment variables take precedence over the file so a single
+            // `docker run` flag can override a baked-in or mounted XML.
+            config.Instances = ParseInstancesFromEnv(instancesFromEnv, logger);
+        }
+        return config;
+    }
+
+    private static PluginConfiguration LoadConfigFile(IApplicationPaths appPaths, ILogger logger)
+    {
+        // The file path can be overridden for container installs where the
+        // data directory layout differs (FEDERATION_CONFIG=/path/to.xml).
+        var path = Environment.GetEnvironmentVariable(EnvConfigPath)
+            ?? Path.Combine(appPaths.PluginConfigurationsPath, ConfigFileName);
         if (!File.Exists(path))
         {
             logger.LogInformation("Federation: no configuration file at {Path}; no channels registered", path);
@@ -95,6 +116,37 @@ public class FederationPluginServiceRegistrator : IPluginServiceRegistrator
         {
             logger.LogError(ex, "Federation: cannot read configuration file {Path}; no channels registered", path);
             return new PluginConfiguration();
+        }
+    }
+
+    /// <summary>
+    /// Parses FEDERATION_INSTANCES, a JSON array of instance objects with the
+    /// camelCase keys "alias", "serverUrl", "username", "password"
+    /// (e.g. [{"alias":"paul","serverUrl":"https://b.example:8920","username":"paul","password":"secret"}]).
+    /// </summary>
+    /// <param name="raw">Raw environment variable value (non-blank).</param>
+    /// <param name="logger">Logger.</param>
+    /// <returns>The parsed instances; empty list on broken input (the plugin then starts without channels, like a broken file).</returns>
+    internal static List<FederationInstance> ParseInstancesFromEnv(string raw, ILogger logger)
+    {
+        try
+        {
+            var parsed = JsonSerializer.Deserialize<FederationInstance[]>(raw, FederationJsonOptions.Options) ?? [];
+            var usable = parsed.Where(i => !string.IsNullOrWhiteSpace(i.Alias)
+                && !string.IsNullOrWhiteSpace(i.ServerUrl)
+                && !string.IsNullOrWhiteSpace(i.Username)
+                && !string.IsNullOrWhiteSpace(i.Password)).ToList();
+            if (usable.Count < parsed.Length)
+            {
+                logger.LogWarning("Federation: {Skipped} of {Total} FEDERATION_INSTANCES entries skipped (missing alias, serverUrl, username or password)",
+                    parsed.Length - usable.Count, parsed.Length);
+            }
+            return usable;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Federation: FEDERATION_INSTANCES is not a valid JSON array of instances; no channels registered");
+            return [];
         }
     }
 }

@@ -231,7 +231,7 @@ each one failed in production or review before being pinned this way.
 ## Testing
 
 ```
-dotnet test -c Release        # 44 tests, all offline
+dotnet test -c Release        # 55 tests, all offline
 ```
 
 - HTTP behavior is tested through `FakeHttpMessageHandler`
@@ -256,6 +256,21 @@ dotnet test -c Release        # 44 tests, all offline
   host's `BasePlugin` configuration persistence — `Plugin.Instance` is
   never touched on the registration path). It holds a password:
   `chmod 600`.
+- Container-friendly configuration (all read in
+  `FederationPluginServiceRegistrator.LoadConfig`, before any host service
+  exists — keep them there, not in `Plugin`):
+  - `FEDERATION_CONFIG` — absolute path of an alternative XML config file
+    (overrides the default location above).
+  - `FEDERATION_INSTANCES` — JSON array of instances
+    (`[{"alias":…,"serverUrl":…,"username":…,"password":…}]`, camelCase
+    via `FederationJsonOptions`); **replaces** the file's instances, so it
+    can override a baked-in or mounted XML from a compose file.
+- Binary releases: `./release.sh` runs the test suite, builds the
+  container target, and packages `dist/Jellyfin.Plugin.Federation-<version>.tar.gz`
+  (DLL only; version from `Directory.Build.props`) plus a `.sha256`.
+  The DLL only loads against the image version recorded in
+  `container/Jellyfin.Plugin.Federation.Container.csproj` — bump that
+  record and re-extract `container-refs/` before shipping for a new image.
 - After a deploy that changes persisted-state formats (stream/image URLs,
   channel names), old rows in the local DB (`BaseItemImageInfos`,
   `MediaSources`) still carry the old values until items are re-hydrated

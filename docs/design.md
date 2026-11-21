@@ -83,6 +83,13 @@ Neue Assembly `Jellyfin.Plugin.Federation` (eigenes Repo/Verzeichnis neben dem S
 </PluginConfiguration>
 ```
 
+**Alternativ via Umgebungsvariablen (Container):** `FEDERATION_CONFIG`
+(Pfad einer alternativen XML-Datei, gleiche Schema) und
+`FEDERATION_INSTANCES` (JSON-Array: `[{"alias":"paul","serverUrl":"…","username":"paul","password":"…"}]`).
+`FEDERATION_INSTANCES` ersetzt die Instanzen der XML-Datei (Env var hat
+Vorrang); gelesen wird beides in `FederationPluginServiceRegistrator.LoadConfig`,
+weil dort noch keine Host-Services existieren (siehe AGENTS.md, Deployment Notes).
+
 ### Authentifizierung (Username/Password statt API-Key)
 
 API-Keys kann nur ein Admin des Remote-Servers anlegen — ein normaler Remote-User (z.B. „paul" auf seinem eigenen Server) hat keinen Zugriff auf das Dashboard-API-Key-Feature. Deshalb V1: **Username + Passwort in der Config-Datei** (Datei liegt im Plugin-Config-Verzeichnis des Client-Servers; Zugriffsschutz = Dateisystem-Rechte des Datenverzeichnisses).

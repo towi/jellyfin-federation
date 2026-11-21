@@ -35,10 +35,18 @@ In B's web UI: **Users → Add user → `paul`**, and grant that user access
 to the libraries you want to share. That user's access defines what shows
 up on A.
 
-### 2. Build the plugin
+### 2. Get the plugin
 
-The plugin builds against a Jellyfin **source checkout**. Clone both as
-siblings (the plugin expects the server checkout in `../jellyfin`):
+**Option A: prebuilt binary (Docker hosts).** Download
+`Jellyfin.Plugin.Federation-<version>.tar.gz` from the
+[releases page](https://github.com/towi/jellyfin-federation/releases).
+The DLL is compiled against the exact assemblies of
+`linuxserver/jellyfin 12.2.0`; a different image (or a different Jellyfin
+version) will fail to load it — then use Option B.
+
+**Option B: build from source.** The plugin builds against a Jellyfin
+**source checkout**. Clone both as siblings (the plugin expects the server
+checkout in `../jellyfin`):
 
 ```
 git clone https://github.com/jellyfin/jellyfin.git
@@ -47,7 +55,8 @@ cd jellyfin-federation && dotnet build -c Release
 ```
 
 Requires the [.NET 10 SDK](https://dotnet.microsoft.com/download) (the
-target framework is `net10.0`).
+target framework is `net10.0`). `./release.sh` builds and packages the
+container-target binary instead.
 
 > **Running Jellyfin in a Docker container instead?** The
 > [container build](AGENTS.md#building-for-a-container-install) compiles the
@@ -56,12 +65,28 @@ target framework is `net10.0`).
 
 ### 3. Deploy to A
 
+The tarball extracts to `Jellyfin.Plugin.Federation/Jellyfin.Plugin.Federation.dll`;
+put that directory into the `plugins` folder of A's data directory
+(`{dataDir}` = `JELLYFIN_DATA_DIR`, e.g. `/var/lib/jellyfin` on a bare-metal
+install, `/config` in the linuxserver image):
+
 ```
-mkdir -p {dataDir}/plugins/Jellyfin.Plugin.Federation {dataDir}/plugins/configurations
-cp bin/Release/net10.0/Jellyfin.Plugin.Federation.dll {dataDir}/plugins/Jellyfin.Plugin.Federation/
+mkdir -p {dataDir}/plugins
+tar -xzf Jellyfin.Plugin.Federation-1.0.0.tar.gz -C {dataDir}/plugins
 ```
 
-`{dataDir}` is A's `JELLYFIN_DATA_DIR` (e.g. `/var/lib/jellyfin`).
+Docker:
+
+```
+docker cp Jellyfin.Plugin.Federation-1.0.0.tar.gz jellyfin:/tmp/
+docker exec jellyfin sh -c 'mkdir -p /config/plugins \
+    && tar -xzf /tmp/Jellyfin.Plugin.Federation-1.0.0.tar.gz -C /config/plugins'
+```
+
+A source build deploys the same way: copy
+`bin/Release/net10.0/Jellyfin.Plugin.Federation.dll` into
+`{dataDir}/plugins/Jellyfin.Plugin.Federation/` (source builds only,
+see step 2).
 
 ### 4. Configure A
 
@@ -91,6 +116,41 @@ and lock it down — it holds a password
 | `Password`     | That user's password (stored in plaintext — see `chmod 600`)     |
 
 More `<FederationInstance>` blocks connect more remote servers.
+
+#### Or configure via environment variables
+
+The same settings can come from the container environment — handy when
+everything lives in a compose file and you do not want a second mounted
+file:
+
+| Variable               | Value                                                                                  |
+|------------------------|----------------------------------------------------------------------------------------|
+| `FEDERATION_INSTANCES` | JSON array of instances: `[{"alias":"paul","serverUrl":"http://192.168.1.50:8097","username":"paul","password":"secret"}]` |
+| `FEDERATION_CONFIG`    | Optional: path of an alternative XML config file (same schema as above)                |
+
+- `FEDERATION_INSTANCES` **replaces** the instances from the XML file —
+  env vars win over the file.
+- A broken JSON value or an entry with a missing field is skipped and
+  logged; the server starts without those channels (same as a broken XML
+  file).
+- The same variables work on bare-metal installs (`Environment` is read
+  from the process environment).
+
+linuxserver compose example (data dir mounted at `./config`, plugin
+deployed in step 3):
+
+```yaml
+services:
+  jellyfin:
+    environment:
+      - 'FEDERATION_INSTANCES=[{"alias":"paul","serverUrl":"http://192.168.1.50:8097","username":"paul","password":"secret"}]'
+```
+
+Mounting the XML file instead keeps the password out of `docker inspect`;
+either file location works — put it at
+`{dataDir}/plugins/configurations/Jellyfin.Plugin.Federation.xml`
+(`./config/plugins/configurations/…` for the linuxserver image) or
+anywhere else and point `FEDERATION_CONFIG` at it.
 
 ### 5. Restart A and browse
 
