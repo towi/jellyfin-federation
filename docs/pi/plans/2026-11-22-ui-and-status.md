@@ -64,9 +64,8 @@ public class RemoteApiClientPrepareTests
     public async Task Prepare_StoresCredentialsWithoutLogin()
     {
         // Prepare must not log in: the views-cache fallback builds channels for a
-        // remote that is down; the login happens later via the 401 self-heal path.
-        var handler = new FakeHttpMessageHandler();
-        var client = new RemoteApiClient(new HttpClient(handler));
+        // remote that is down; the login happens later via the proactive
+        // empty-token path in GetJsonAsync (first authenticated call).
 
         client.Prepare("paul", "https://remote.example.com:8920", "paul", "secret");
 
@@ -79,7 +78,8 @@ public class RemoteApiClientPrepareTests
     public async Task GetItems_WithTokenLessClient_LogsInOnceThenFetches()
     {
         // Self-heal: a request on a prepared-but-not-logged-in client triggers one
-        // login, then retries the request with the fresh token.
+        // proactive login (empty-token path), then sends the request with the fresh
+        // token — no dead 401 round-trip with an empty ApiKey.
         var handler = CreateHandler();
         handler.Add(
             req => req.RequestUri!.AbsolutePath.StartsWith("/Items", StringComparison.Ordinal),
@@ -169,7 +169,27 @@ Expected: **compile error** CS1061 (`Prepare` not found).
 
 Split `ConfigureAsync` into `Prepare` (all of the current body except the final `return await LoginAsync(...)`; make it **synchronous**, return `void`) and keep `ConfigureAsync` as `Prepare(alias, serverUrl, username, password); return await LoginAsync(cancellationToken).ConfigureAwait(false);` — callers (factory) unchanged.
 
-In `GetJsonAsync`, before sending: if `_accessToken` is empty → `await LoginAsync(cancellationToken)` **once** (not under `_loginLock`; concurrent callers are acceptable — the login is idempotent; each concurrent caller gets a valid token because `LoginAsync` overwrites `_accessToken` atomically; a duplicate login for a *reachable* remote only creates one extra device row in the rare first-browse race, acceptable and same class as the startup retry's re-login). Then continue with the existing snapshot/401/refresh logic.
+In `GetJsonAsync`, **before sending**: if `_accessToken` is empty → login proactively, single-flight under the existing `_loginLock` (the same pattern as `RefreshTokenAsync`; concurrent first callers share one login — a duplicate login would create an extra device row on the remote, invariant 2 territory):
+
+```csharp
+if (string.IsNullOrEmpty(_accessToken))
+{
+    await _loginLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+    try
+    {
+        if (string.IsNullOrEmpty(_accessToken))
+        {
+            await LoginAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+    finally
+    {
+        _loginLock.Release();
+    }
+}
+```
+
+Then continue with the existing snapshot/401/refresh logic. Because the login is proactive, the first request never carries an empty `ApiKey` — no dead 401 round-trip.
 
 Reporter wiring in `GetJsonAsync` (and only there — login failures during requests are reported through it):
 
