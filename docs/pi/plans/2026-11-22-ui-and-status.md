@@ -104,6 +104,27 @@ public class RemoteApiClientPrepareTests
     }
 
     [Fact]
+    public async Task GetItems_ConcurrentFirstCalls_ShareOneLogin()
+    {
+        // Spec: single-flight under _loginLock — concurrent first callers of a
+        // token-less client share one login (a duplicate login creates a second
+        // device row on the remote, invariant 2).
+        var handler = CreateHandler();
+        handler.Add(
+            req => req.RequestUri!.AbsolutePath.StartsWith("/Items", StringComparison.Ordinal),
+            File.ReadAllText("Data/items-response.json"));
+        var client = new RemoteApiClient(new HttpClient(handler));
+        client.Prepare("paul", "https://remote.example.com:8920", "paul", "secret");
+
+        await Task.WhenAll(
+            client.GetItemsAsync("f1e2d3c4b5a60718293a4b5c6d7e8f90", null, null, CancellationToken.None),
+            client.GetItemsAsync("f1e2d3c4b5a60718293a4b5c6d7e8f90", null, null, CancellationToken.None),
+            client.GetItemsAsync("f1e2d3c4b5a60718293a4b5c6d7e8f90", null, null, CancellationToken.None));
+
+        Assert.Equal(1, handler.Requests.Count(r => r.RequestUri!.AbsolutePath == "/Users/AuthenticateByName"));
+    }
+
+    [Fact]
     public async Task GetItems_ReportsSuccessWithTimestamp()
     {
         var handler = CreateHandler();
@@ -310,9 +331,9 @@ Note the reporter is invoked *before* rethrowing — the channel's own catch/log
 ```bash
 dotnet test -c Release --filter "FullyQualifiedName~RemoteApiClientPrepareTests"
 ```
-Expected: 6 PASS.
+Expected: 7 PASS.
 
-- [ ] **Step 5: Full regression** — `dotnet test -c Release` (44 existing + 6 new = 50 pass). Existing tests reference `ConfigureAsync` — they keep working since it still exists. Then build both targets. Commit:
+- [ ] **Step 5: Full regression** — `dotnet test -c Release` (44 existing + 7 new = 51 pass). Existing tests reference `ConfigureAsync` — they keep working since it still exists. Then build both targets. Commit:
 
 ```python
 # eval commit tool
@@ -952,6 +973,9 @@ public class FederationStatusService : IHostedService
     public void RegisterChannels(string alias, string[] channelNames)
         => _states.GetOrAdd(alias, a => new InstanceStatus(a)).Channels = channelNames;
 
+    /// <summary>True if <paramref name="alias"/> was registered at startup (has a configured instance).</summary>
+    public bool IsTracked(string? alias) => !string.IsNullOrWhiteSpace(alias) && _states.ContainsKey(alias!);
+
     /// <summary>Records an authenticated-call outcome from a RemoteApiClient (Task 1 reporter).</summary>
     public void ReportOutcome(string alias, RemoteApiReport report)
     {
@@ -1152,7 +1176,9 @@ public class FederationStatusServiceTests
         clock = new FakeClock(DateTimeOffset.Parse("2026-11-22T10:00:00Z"));
         var config = new PluginConfiguration();
         config.Instances.Add(Instance());
-        var service = new FederationStatusService(() => config, new HttpClient(handler), Logger, () => clock.Now);
+        // Injected delay: the loop never waits 5 s in tests (instant completion is
+        // fine — StartStop_SmokeTest only proves the lifecycle does not throw).
+        var service = new FederationStatusService(() => config, new HttpClient(handler), Logger, () => clock.Now, (_, _) => Task.CompletedTask);
         service.RegisterInstance(Instance());
         return service;
     }
@@ -1284,7 +1310,7 @@ public class FederationStatusServiceTests
 (`ThrowingHandler` is already defined top-level in `RemoteApiClientTests.cs` by Task 1 — the same test assembly/namespace, so it is visible here.)
 
 Notes:
-- `FederationStatusService` constructor for production (Task 6 wiring): `(Func<PluginConfiguration>, HttpClient, ILogger)` with optional `Func<DateTimeOffset>? clock = null`. The loop's own delay stays real — tests never enter it (`StartStop_SmokeTest` just proves lifecycle does not throw).
+- `FederationStatusService` constructor for production (Task 6 wiring): `(Func<PluginConfiguration>, HttpClient, ILogger)` with optional `Func<DateTimeOffset>? clock = null` and `Func<TimeSpan, CancellationToken, Task>? delay = null`. The loop's delay is injectable so `StartStop_SmokeTest` completes in milliseconds (a 5 s real delay would tax every test run; a cancelled delay throws OCE immediately, which `StopAsync` already swallows).
 - `ProbeOnceAsync` and `NextProbeDue` are **public** (the repo has no `InternalsVisibleTo`; public surface of the service class is fine — the controller lives in the same assembly). The due-time map is a **member** (`ConcurrentDictionary<string, DateTimeOffset>`), not loop-local — `ProbeOnceAsync` reads/writes it, `NextProbeDue` exposes it, and the sketch's loop-local `nextProbe` variable must be replaced by that member.
 
 - [ ] **Step 2: Run — expect compile failure.**
@@ -1416,9 +1442,10 @@ public class FederationController : ControllerBase
 
     private void ReportTestOutcome(string? alias, bool ok, string? reason)
     {
-        // TestCredentials may run for an unsaved (new) alias: only report to the
-        // status service for aliases it already tracks.
-        if (string.IsNullOrWhiteSpace(alias))
+        // TestCredentials may run for an unsaved (new) alias — report only for
+        // aliases the status service already tracks, so a typo or not-yet-saved
+        // instance cannot create a ghost status row.
+        if (!_status.IsTracked(alias))
         {
             return;
         }
