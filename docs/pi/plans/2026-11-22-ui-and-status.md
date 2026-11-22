@@ -4,6 +4,8 @@
 
 **Goal:** Dashboard config UI + status page + views-cache survival for the federation plugin, per the approved spec `docs/pi/specs/2026-11-22-ui-and-status-design.md`.
 
+**Note:** Task order deviates from the spec's phase order (UI first) on purpose — the reporter/cache/status groundwork (Tasks 1–4) lands first because the UI and endpoints depend on it. See the spec's "Implementation order" and "Deviations" sections.
+
 **Architecture:** Config read/write reuses the host's plugin-config API (`GET/POST /Plugins/{id}/Configuration`, admin-gated) from an embedded dashboard page (`IHasWebPages`, host-served, no iframe, `window.ApiClient`/`window.Dashboard` globals — verified in jellyfin-web master: `window.ApiClient` set in `ServerConnections.setLocalApiClient`, `window.Dashboard` in `src/utils/dashboard.js`). Status and test-connection live in a plugin MVC controller (`ControllerBase`, auto-registered via `GetApiPluginAssemblies`). A `FederationStatusService` (`IHostedService`) probes remotes **unauthenticated** (`GET /System/Info/Public`, `PublicSystemInfo` = `MediaBrowser.Model/System/PublicSystemInfo.cs` — fields `ServerName`, `Version`). Survival uses a views-cache JSON: startup login fails transiently → build channels from cache with a token-less client that self-heals via the existing 401-re-login.
 
 **Tech Stack:** .NET 10, ASP.NET Core MVC (host-loaded shared framework), System.Text.Json, vanilla JS, xUnit + `FakeHttpMessageHandler`.
@@ -29,7 +31,7 @@ export PATH="$DOTNET_ROOT:$PATH"
 - Modify: `src/RemoteApiClient.cs`
 - Test: `tests/Jellyfin.Plugin.Federation.Tests/RemoteApiClientTests.cs` (append facts + fake at file end)
 
-**Design:** Today `ConfigureAsync(alias, serverUrl, username, password, ct)` sets up credentials **and logs in**. The views-cache fallback (Task 7) needs a client with credentials but no token. Split: `ConfigureAsync` becomes `Prepare(alias, serverUrl, username, password)` (no login, no throw) + existing `LoginAsync` flow. The factory calls `Prepare` + `LoginAsync` sequence exactly as before (same retry semantics, same 401-refresh behavior — the 401 path already handles the empty-token case because the first request carries `ApiKey=` empty and the remote answers 401). Add `LastAuthenticatedUtc` (DateTimeOffset?; set on every successful authenticated GET in `GetJsonAsync`) and a reporting callback:
+**Design:** Today `ConfigureAsync(alias, serverUrl, username, password, ct)` sets up credentials **and logs in**. The views-cache fallback (Task 3) needs a client with credentials but no token. Split: `ConfigureAsync` becomes `Prepare(alias, serverUrl, username, password)` (no login, no throw) + existing `LoginAsync` flow. The factory calls `Prepare` + `LoginAsync` sequence exactly as before (same retry semantics). Token-less self-heal (Task 3 fallback path): the first authenticated call logs in **proactively, single-flight under `_loginLock`**, so no request is ever sent with an empty `ApiKey` (the mid-run 401 → `RefreshTokenAsync` path is unchanged and still handles token revocation). Add `LastAuthenticatedUtc` (DateTimeOffset?; set on every successful authenticated GET in `GetJsonAsync`) and a reporting callback:
 
 ```csharp
 /// <summary>Receives request outcomes for the status page.</summary>
@@ -44,9 +46,9 @@ public void SetReporter(Action<RemoteApiReport>? reporter);
 public sealed record RemoteApiReport(bool Succeeded, string? Error, bool AuthFailed);
 ```
 
-Error sanitization rule: `ex.Message` truncated to 200 chars; `FederationException` messages already contain no tokens (verified: login message is `Login to {BaseUrl} failed: {code}`; GetJsonAsync message contains the bare url without `ApiKey`) — but the `url` in `Remote server returned {code} for {url}` must be stripped: report only `Remote server returned {code}`. `HttpRequestException` → `"unreachable"`. Timeout/`TaskCanceledException` → `"timeout"`. Keep the raw exception out of the report.
+Error sanitization rule (implemented by `SanitizeError` below): report **fixed category strings only, never raw exception text** — `FederationException` with status code → `remote returned {code}` (never include the URL: it may carry `ApiKey`), `FederationException` without status → `remote error`, `TaskCanceledException` → `timeout`, anything else (`HttpRequestException` et al.) → `unreachable`. The status service adds `probe failed` for its own probe errors. Keep the raw exception out of the report (invariant 9 — the status surface is logged).
 
-- [ ] **Step 1: Write failing tests** (append to `RemoteApiClientTests.cs`, before existing helper classes at the end of the file; check the file first for where facts end)
+- [ ] **Step 1: Write failing tests** (append to `RemoteApiClientTests.cs`, before existing helper classes at the end of the file; check the file first for where facts end). Also add the `ThrowingHandler` shown below at the end of the **same file, inside its `namespace Jellyfin.Plugin.Federation.Tests;` block** (alongside the existing `FakeHttpMessageHandler` helper) — Tasks 4 and 5 reference it from the same namespace.
 
 ```csharp
 public class RemoteApiClientPrepareTests
@@ -61,11 +63,13 @@ public class RemoteApiClientPrepareTests
     }
 
     [Fact]
-    public async Task Prepare_StoresCredentialsWithoutLogin()
+    public void Prepare_StoresCredentialsWithoutLogin()
     {
         // Prepare must not log in: the views-cache fallback builds channels for a
         // remote that is down; the login happens later via the proactive
         // empty-token path in GetJsonAsync (first authenticated call).
+        var handler = CreateHandler();
+        var client = new RemoteApiClient(new HttpClient(handler));
 
         client.Prepare("paul", "https://remote.example.com:8920", "paul", "secret");
 
@@ -140,6 +144,30 @@ public class RemoteApiClientPrepareTests
     }
 
     [Fact]
+    public async Task ConfigureAsync_ReportsAuthFailureOn401Login()
+    {
+        // Startup with a wrong password: the login 401s and the reporter sees
+        // AuthFailed — otherwise the unauthenticated probe would show Online
+        // while every channel call fails.
+        var handler = new FakeHttpMessageHandler();
+        handler.Add(
+            req => req.Method == HttpMethod.Post && req.RequestUri!.AbsolutePath == "/Users/AuthenticateByName",
+            string.Empty,
+            HttpStatusCode.Unauthorized);
+        var client = new RemoteApiClient(new HttpClient(handler));
+        RemoteApiReport? reported = null;
+        client.SetReporter(r => reported = r);
+
+        await Assert.ThrowsAsync<FederationException>(
+            () => client.ConfigureAsync("paul", "https://remote.example.com:8920", "paul", "wrong", CancellationToken.None));
+
+        Assert.NotNull(reported);
+        Assert.False(reported!.Value.Succeeded);
+        Assert.True(reported.Value.AuthFailed);
+        Assert.Single(handler.Requests); // no retry on definitive failure
+    }
+
+    [Fact]
     public async Task GetItems_ReportsConnectionFailureWithoutAuthFlag()
     {
         var handler = new ThrowingHandler();
@@ -156,6 +184,14 @@ public class RemoteApiClientPrepareTests
         Assert.False(reported.Value.AuthFailed);
     }
 }
+
+/// <summary>Shared handler that always throws HttpRequestException (remote down). Top-level, shared by Tasks 1, 4, 5.</summary>
+internal sealed class ThrowingHandler : HttpMessageHandler
+{
+    /// <inheritdoc />
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        => throw new HttpRequestException("connection refused");
+}
 ```
 
 - [ ] **Step 2: Run tests — expect compile failure** (`Prepare`/`SetReporter`/`LastAuthenticatedUtc` don't exist)
@@ -167,7 +203,30 @@ Expected: **compile error** CS1061 (`Prepare` not found).
 
 - [ ] **Step 3: Implement in `src/RemoteApiClient.cs`**
 
-Split `ConfigureAsync` into `Prepare` (all of the current body except the final `return await LoginAsync(...)`; make it **synchronous**, return `void`) and keep `ConfigureAsync` as `Prepare(alias, serverUrl, username, password); return await LoginAsync(cancellationToken).ConfigureAwait(false);` — callers (factory) unchanged.
+Split `ConfigureAsync` into `Prepare` (all of the current body except the final `return await LoginAsync(...)`; make it **synchronous**, return `void`) and keep `ConfigureAsync` as:
+
+```csharp
+/// <summary>
+/// Prepares credentials and logs in (startup path). A failed login is
+/// reported through the outcome reporter — startup 401s must surface as
+/// InvalidCredentials, not a green Online probe.
+/// </summary>
+public async Task<Guid> ConfigureAsync(string alias, string serverUrl, string username, string password, CancellationToken cancellationToken)
+{
+    Prepare(alias, serverUrl, username, password);
+    try
+    {
+        return await LoginAsync(cancellationToken).ConfigureAwait(false);
+    }
+    catch (Exception ex) when (!(ex is OperationCanceledException && cancellationToken.IsCancellationRequested))
+    {
+        Report(ex);
+        throw;
+    }
+}
+```
+
+— so the reporter also sees **startup** login failures (the factory wires it via `clientSetup` before calling `ConfigureAsync`; the retry loop's `IsDefinitiveAuthFailure` filter guarantees a 401 is reported exactly once, no retry churn).
 
 In `GetJsonAsync`, **before sending**: if `_accessToken` is empty → login proactively, single-flight under the existing `_loginLock` (the same pattern as `RefreshTokenAsync`; concurrent first callers share one login — a duplicate login would create an extra device row on the remote, invariant 2 territory):
 
@@ -248,9 +307,9 @@ Note the reporter is invoked *before* rethrowing — the channel's own catch/log
 ```bash
 dotnet test -c Release --filter "FullyQualifiedName~RemoteApiClientPrepareTests"
 ```
-Expected: 5 PASS.
+Expected: 6 PASS.
 
-- [ ] **Step 5: Full regression** — `dotnet test -c Release` (44 existing + 5 new = 49 pass). Existing tests reference `ConfigureAsync` — they keep working since it still exists. Then build both targets. Commit:
+- [ ] **Step 5: Full regression** — `dotnet test -c Release` (44 existing + 6 new = 50 pass). Existing tests reference `ConfigureAsync` — they keep working since it still exists. Then build both targets. Commit:
 
 ```python
 # eval commit tool
@@ -306,9 +365,9 @@ public class FederationViewsCache
     /// </summary>
     /// <param name="cachePath">Host cache path (IApplicationPaths.CachePath).</param>
     /// <param name="logger">Logger.</param>
-    public FederationViewsCache(string cachePath, ILogger logger)
+    public FederationViewsCache(string dataPath, ILogger logger)
     {
-        _rootPath = Path.Combine(cachePath, "federation");
+        _rootPath = Path.Combine(dataPath, "federation");
         _logger = logger;
     }
 
@@ -317,10 +376,11 @@ public class FederationViewsCache
     /// </summary>
     /// <param name="alias">Instance alias.</param>
     /// <param name="serverUrl">Remote base URL (any trailing slash tolerated).</param>
+    /// <param name="username">Configured remote username (part of the key).</param>
     /// <returns>The cached views, empty when none are usable.</returns>
-    public IReadOnlyList<CachedView> Load(string alias, string serverUrl)
+    public IReadOnlyList<CachedView> Load(string alias, string serverUrl, string username)
     {
-        var path = FilePath(alias, serverUrl);
+        var path = FilePath(alias, serverUrl, username);
         if (!File.Exists(path))
         {
             return Array.Empty<CachedView>();
@@ -342,22 +402,33 @@ public class FederationViewsCache
 
     /// <summary>
     /// Persists the views of one instance (atomic: temp file + move).
+    /// Never throws: a failed write is logged and swallowed.
     /// </summary>
     /// <param name="alias">Instance alias.</param>
     /// <param name="serverUrl">Remote base URL.</param>
+    /// <param name="username">Configured remote username (part of the key).</param>
     /// <param name="views">Views to store.</param>
-    public void Save(string alias, string serverUrl, IReadOnlyList<CachedView> views)
+    public void Save(string alias, string serverUrl, string username, IReadOnlyList<CachedView> views)
     {
-        var path = FilePath(alias, serverUrl);
-        Directory.CreateDirectory(Path.GetDirectoryName(path) ?? path);
-        var temp = path + ".tmp";
-        File.WriteAllText(temp, JsonSerializer.Serialize(views, Options));
-        File.Move(temp, path, overwrite: true);
+        var path = FilePath(alias, serverUrl, username);
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(path) ?? path);
+            var temp = path + ".tmp";
+            File.WriteAllText(temp, JsonSerializer.Serialize(views, Options));
+            File.Move(temp, path, overwrite: true);
+        }
+        catch (Exception ex)
+        {
+            // A local disk problem must never kill channel creation or be
+            // misdiagnosed as a remote-connectivity failure.
+            _logger.LogWarning(ex, "Federation: cannot write views cache {Path}; continuing without cache", path);
+        }
     }
 
-    private string FilePath(string alias, string serverUrl)
+    private string FilePath(string alias, string serverUrl, string username)
     {
-        var raw = alias.Trim() + "|" + serverUrl.Trim().TrimEnd('/');
+        var raw = alias.Trim() + "|" + serverUrl.Trim().TrimEnd('/') + "|" + username;
         var key = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(raw))).ToLowerInvariant()[..16];
         return Path.Combine(_rootPath, key, "views.json");
     }
@@ -389,8 +460,8 @@ public class FederationViewsCacheTests : IDisposable
             new CachedView("f1e2d3c4b5a60718293a4b5c6d7e8f91", "Serien", "tvshows", "paul · Serien (f1e2d3c4)")
         };
 
-        cache.Save("paul", "https://remote.example.com:8920", views);
-        var loaded = cache.Load("paul", "https://remote.example.com:8920");
+        cache.Save("paul", "https://remote.example.com:8920", "paul", views);
+        var loaded = cache.Load("paul", "https://remote.example.com:8920", "paul");
 
         Assert.Equal(views, loaded);
     }
@@ -400,18 +471,18 @@ public class FederationViewsCacheTests : IDisposable
     {
         var cache = new FederationViewsCache(_dir, NullLogger.Instance);
 
-        Assert.Empty(cache.Load("paul", "https://remote.example.com:8920"));
+        Assert.Empty(cache.Load("paul", "https://remote.example.com:8920", "paul"));
     }
 
     [Fact]
     public void Load_CorruptFile_ReturnsEmpty()
     {
         var cache = new FederationViewsCache(_dir, NullLogger.Instance);
-        cache.Save("paul", "https://remote.example.com:8920", Array.Empty<CachedView>());
+        cache.Save("paul", "https://remote.example.com:8920", "paul", Array.Empty<CachedView>());
         var path = Directory.GetFiles(_dir, "views.json", SearchOption.AllDirectories)[0];
         File.WriteAllText(path, "{ not json");
 
-        Assert.Empty(cache.Load("paul", "https://remote.example.com:8920"));
+        Assert.Empty(cache.Load("paul", "https://remote.example.com:8920", "paul"));
     }
 
     [Fact]
@@ -420,19 +491,21 @@ public class FederationViewsCacheTests : IDisposable
         // Invariant 1 in config form: a trailing slash in the URL must not create a
         // second cache entry.
         var cache = new FederationViewsCache(_dir, NullLogger.Instance);
-        cache.Save("paul", "https://remote.example.com:8920/", new[] { new CachedView("a", "Filme", "movies", "paul · Filme") });
+        cache.Save("paul", "https://remote.example.com:8920/", "paul", new[] { new CachedView("a", "Filme", "movies", "paul · Filme") });
 
-        Assert.Single(cache.Load("paul", "https://remote.example.com:8920"));
+        Assert.Single(cache.Load("paul", "https://remote.example.com:8920", "paul"));
     }
 
     [Fact]
     public void Load_DifferentAliasOrUrl_IsIsolated()
     {
         var cache = new FederationViewsCache(_dir, NullLogger.Instance);
-        cache.Save("paul", "https://remote.example.com:8920", new[] { new CachedView("a", "Filme", "movies", "paul · Filme") });
+        cache.Save("paul", "https://remote.example.com:8920", "paul", new[] { new CachedView("a", "Filme", "movies", "paul · Filme") });
 
-        Assert.Empty(cache.Load("paul", "https://other.example.com:8920"));
-        Assert.Empty(cache.Load("paulzwei", "https://remote.example.com:8920"));
+        Assert.Empty(cache.Load("paul", "https://other.example.com:8920", "paul"));
+        Assert.Empty(cache.Load("paulzwei", "https://remote.example.com:8920", "paul"));
+        // Credential rotation: a different username is a different cache entry.
+        Assert.Empty(cache.Load("paul", "https://remote.example.com:8920", "otheruser"));
     }
 
     /// <inheritdoc />
@@ -468,12 +541,12 @@ await d.commit("feat: per-instance views cache for down-at-startup channel rebui
 
 **Files:**
 - Modify: `src/FederationChannelFactory.cs`
-- Modify: `src/FederationChannelOptions.cs` (add `FromCache` to `FederationChannelOptions`? **No** — keep the record unchanged; "from cache" is a startup detail logged by the factory, not channel state. Decision: no options change.)
-- Test: extend `tests/Jellyfin.Plugin.Federation.Tests/FederationChannelFactoryTests.cs`
+- Modify: `src/FederationChannelOptions.cs` (no change — "from cache" is a startup detail logged by the factory, not channel state)
+- Create: `tests/Jellyfin.Plugin.Federation.Tests/FederationChannelFactoryCacheTests.cs` (new file; `ThrowingHandler` not needed here)
 
 **Design:** Factory gets an optional `FederationViewsCache` constructor parameter (default null = cache disabled, existing tests unaffected). Flow per instance:
 
-1. Live path (unchanged): retry login+views (4 attempts, 3 s, definitive 401/403 excluded — invariant 3). On success: build channels from live views (existing dedup loop), then `cache.Save(alias, serverUrl, cachedViews)` where `cachedViews` mirrors the built channels (including dedup suffixes).
+1. Live path (unchanged): retry login+views (4 attempts, 3 s, definitive 401/403 excluded — invariant 3). On success: build channels from live views (existing dedup loop), then `cache.Save(alias, serverUrl, username, cachedViews)` where `cachedViews` mirrors the built channels (including dedup suffixes), and `status.RegisterChannels(alias, names)`.
 2. Fallback: when the retry loop gives up with a **transient** error (`!IsDefinitiveAuthFailure(ex)`) and the cache has views → `client.Prepare(...)` (token-less) and build channels from the cached `ChannelName`/`RemoteLibraryId` values directly (no live views needed; **names come from the cache**, not recomputed — byte-stability). Log `LogWarning("Federation: {Alias} unreachable at startup; using cached views for {Count} channels", ...)`.
 3. Definitive 401/403 or no cache → current behavior (skip, `LogError`).
 
@@ -494,8 +567,18 @@ public FederationChannelFactory(
     Func<RemoteApiClient> clientFactory,
     ILogger logger,
     TimeSpan? loginRetryDelay = null,
-    FederationViewsCache? viewsCache = null)
+    FederationViewsCache? viewsCache = null,
+    Action<RemoteApiClient, string>? clientSetup = null,
+    FederationStatusService? status = null)
+{
+    // ... existing assignments ...
+    _viewsCache = viewsCache;
+    _clientSetup = clientSetup; // invoked right after _clientFactory() in both live and fallback paths
+    _status = status;
+}
 ```
+
+All parameters default, so every existing test call site keeps compiling (the existing `(clientFactory, logger, TimeSpan)` sites are unaffected — `loginRetryDelay` keeps its position).
 
 Fallback-detection detail: the retry loop's exception after `MaxLoginAttempts` needs classification. The existing catch-all at the bottom (`catch (Exception ex) { _logger.LogError(...) }`) becomes: record `lastError`; after the loop, if `viewsCache` has views for the instance and `!IsDefinitiveAuthFailure(lastError)` → build from cache, else rethrow/skip as today.
 
@@ -510,6 +593,7 @@ QueryResult<BaseItemDto>? views = null;
 Guid remoteUserId = Guid.Empty;
 
 client = _clientFactory();
+_clientSetup?.Invoke(client, instance.Alias); // wire the outcome reporter (Task 6)
 // existing retry loop assigns remoteUserId + views, or leaves lastError set
 
 if (views is not null)
@@ -524,18 +608,20 @@ if (views is not null)
         channels.Add(new FederationChannel(new FederationChannelOptions(instance.Alias, channelName, view.Id.ToString("N"), serverUrl), client, _logger));
     }
 
-    _viewsCache?.Save(instance.Alias, serverUrl, channelsForInstance
+    _viewsCache?.Save(instance.Alias, serverUrl, instance.Username, channelsForInstance
         .Select(c => new CachedView(c.RemoteLibraryId, c.LibraryName, c.CollectionType, c.ChannelName))
         .ToList());
+    _status?.RegisterChannels(instance.Alias, channelsForInstance.Select(c => c.ChannelName).ToArray());
 }
 else if (lastError is not null && !IsDefinitiveAuthFailure(lastError))
 {
-    var cached = _viewsCache?.Load(instance.Alias, serverUrl) ?? Array.Empty<CachedView>();
+    var cached = _viewsCache?.Load(instance.Alias, serverUrl, instance.Username) ?? Array.Empty<CachedView>();
     if (cached.Count > 0)
     {
         _logger.LogWarning(lastError,
             "Federation: {Alias} ({Url}) unreachable at startup; rebuilding {Count} channels from cached views",
             instance.Alias, serverUrl, cached.Count);
+        var builtNames = new List<string>(cached.Count);
         foreach (var view in cached)
         {
             if (!seenNames.Add(view.ChannelName))
@@ -547,9 +633,19 @@ else if (lastError is not null && !IsDefinitiveAuthFailure(lastError))
                 new FederationChannelOptions(instance.Alias, view.ChannelName, view.RemoteLibraryId, serverUrl),
                 client,
                 _logger));
+            builtNames.Add(view.ChannelName);
         }
 
-        client.Prepare(instance.Alias, serverUrl, instance.Username, instance.Password);
+        // Prepare only if the client has no token yet (all logins failed:
+        // remote down). If a login had succeeded (views fetch failed), the token
+        // is already set and re-rolling the DeviceId would invalidate it
+        // (invariant 2).
+        if (string.IsNullOrEmpty(client.AccessToken))
+        {
+            client.Prepare(instance.Alias, serverUrl, instance.Username, instance.Password);
+        }
+
+        _status?.RegisterChannels(instance.Alias, builtNames.ToArray());
     }
     else
     {
@@ -566,7 +662,7 @@ Extract `RegisterUniqueChannelName(HashSet<string> seenNames, string alias, stri
 
 Careful with the client lifecycle: in the fallback path `client.Prepare` must happen **before** any channel uses it; the channels hold the client reference. In the live path, `ConfigureAsync` already prepared it.
 
-- [ ] **Step 1: Write failing tests** (append to `FederationChannelFactoryTests.cs`):
+- [ ] **Step 1: Write failing tests** — `tests/Jellyfin.Plugin.Federation.Tests/FederationChannelFactoryCacheTests.cs` (new file; copy the `CreateHandler`/`CreateConfig`/`CreateValidInstance` helpers from `FederationChannelFactoryTests.cs`):
 
 ```csharp
 public class FederationChannelFactoryCacheTests
@@ -609,7 +705,7 @@ public class FederationChannelFactoryCacheTests
             var channels = await factory.CreateChannelsAsync(CreateConfig(CreateValidInstance()), CancellationToken.None);
 
             Assert.Equal(3, channels.Count);
-            var cached = cache.Load("paul", BaseUrl);
+            var cached = cache.Load("paul", BaseUrl, "paul");
             Assert.Equal(3, cached.Count);
             Assert.Contains(cached, c => c.ChannelName == "paul · Filme" && c.RemoteLibraryId == "f1e2d3c4b5a60718293a4b5c6d7e8f90");
         }
@@ -626,7 +722,7 @@ public class FederationChannelFactoryCacheTests
         try
         {
             var cache = new FederationViewsCache(dir, Logger);
-            cache.Save("paul", BaseUrl, new[]
+            cache.Save("paul", BaseUrl, "paul", new[]
             {
                 new CachedView("f1e2d3c4b5a60718293a4b5c6d7e8f90", "Filme", "movies", "paul · Filme"),
                 new CachedView("f1e2d3c4b5a60718293a4b5c6d7e8f91", "Serien", "tvshows", "paul · Serien")
@@ -683,7 +779,7 @@ public class FederationChannelFactoryCacheTests
         try
         {
             var cache = new FederationViewsCache(dir, Logger);
-            cache.Save("paul", BaseUrl, new[] { new CachedView("a", "Filme", "movies", "paul · Filme") });
+            cache.Save("paul", BaseUrl, "paul", new[] { new CachedView("a", "Filme", "movies", "paul · Filme") });
             var handler = new FakeHttpMessageHandler();
             handler.Add(
                 req => req.Method == HttpMethod.Post && req.RequestUri!.AbsolutePath == "/Users/AuthenticateByName",
@@ -711,7 +807,7 @@ public class FederationChannelFactoryCacheTests
         try
         {
             var cache = new FederationViewsCache(dir, Logger);
-            cache.Save("paul", BaseUrl, new[] { new CachedView("f1e2d3c4b5a60718293a4b5c6d7e8f90", "Filme", "movies", "paul · Filme") });
+            cache.Save("paul", BaseUrl, "paul", new[] { new CachedView("f1e2d3c4b5a60718293a4b5c6d7e8f90", "Filme", "movies", "paul · Filme") });
             var downHandler = new FakeHttpMessageHandler();
             downHandler.Add(
                 req => req.Method == HttpMethod.Post && req.RequestUri!.AbsolutePath == "/Users/AuthenticateByName",
@@ -736,9 +832,7 @@ public class FederationChannelFactoryCacheTests
 }
 ```
 
-(Note: add `using System.IO;` if not present — it is present. These tests live in a new class in the same file per the plan's file layout, after the existing `FederationChannelFactoryTests` class body — actually as a **separate class in the same file** or new file; per repo layout, create `tests/.../FederationChannelFactoryCacheTests.cs` as its own file to keep files focused. Adjust the Test path above accordingly.)
-
-- [ ] **Step 2: Run — expect compile failure** (no `viewsCache` ctor param).
+- [ ] **Step 2: Run — expect compile failure** (no `viewsCache`/`status` ctor params).
 - [ ] **Step 3: Implement** per the sketch. Move the current dedup block into `RegisterUniqueChannelName` verbatim; keep the live path behavior byte-identical (existing tests must pass unchanged).
 - [ ] **Step 4: Run new tests (5 PASS) + full suite (all pass). Build both targets.** Commit:
 
@@ -760,6 +854,7 @@ await d.commit("feat: factory falls back to cached views when remote unreachable
 ```csharp
 using System;
 using System.Collections.Concurrent;
+using System.Linq;
 using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
@@ -796,6 +891,7 @@ public enum FederationInstanceState
 public class FederationStatusService : IHostedService
 {
     private readonly ConcurrentDictionary<string, InstanceStatus> _states = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _nextProbe = new(StringComparer.Ordinal); // alias → earliest next probe
     private readonly HttpClient _httpClient;
     private readonly ILogger _logger;
     private readonly Func<DateTimeOffset> _clock;
@@ -803,17 +899,41 @@ public class FederationStatusService : IHostedService
     private readonly TimeSpan[] _backoffSteps = { TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(60), TimeSpan.FromSeconds(120), TimeSpan.FromSeconds(240), TimeSpan.FromSeconds(480), TimeSpan.FromSeconds(600) };
     private readonly Func<PluginConfiguration> _configProvider;
     private CancellationTokenSource? _cts;
+    private Task? _loopTask;
 
-    // ... constructor takes (Func<PluginConfiguration> configProvider, HttpClient httpClient, ILogger logger,
-    //     Func<DateTimeOffset>? clock = null, Func<TimeSpan, CancellationToken, Task>? delay = null)
+    /// <summary>
+    /// Initializes a new instance of the <see cref="FederationStatusService"/> class.
+    /// </summary>
+    /// <param name="configProvider">Provides the loaded configuration (fixed at startup).</param>
+    /// <param name="httpClient">Dedicated probe client (5 s timeout, no auth header).</param>
+    /// <param name="logger">Logger.</param>
+    /// <param name="clock">Time source (injectable for deterministic backoff tests).</param>
+    /// <param name="delay">Loop delay (injectable; defaults to real Task.Delay).</param>
+    public FederationStatusService(
+        Func<PluginConfiguration> configProvider,
+        HttpClient httpClient,
+        ILogger logger,
+        Func<DateTimeOffset>? clock = null,
+        Func<TimeSpan, CancellationToken, Task>? delay = null)
+    {
+        _configProvider = configProvider;
+        _httpClient = httpClient;
+        _logger = logger;
+        _clock = clock ?? (() => DateTimeOffset.UtcNow);
+        _delay = delay ?? ((ts, ct) => Task.Delay(ts, ct));
+    }
 
-    /// <summary>Registers one instance (called once at startup with the loaded config).</summary>
+    /// <summary>Registers one instance (called once at startup with the loaded config; gives rows their URL/username).</summary>
     public void RegisterInstance(FederationInstance instance)
         => _states.GetOrAdd(instance.Alias, a => new InstanceStatus(a)
         {
             ServerUrl = instance.ServerUrl.TrimEnd('/'),
             Username = instance.Username
         });
+
+    /// <summary>Records the channel names an instance contributes (called by the factory after channel creation).</summary>
+    public void RegisterChannels(string alias, string[] channelNames)
+        => _states.GetOrAdd(alias, a => new InstanceStatus(a)).Channels = channelNames;
 
     /// <summary>Records an authenticated-call outcome from a RemoteApiClient (Task 1 reporter).</summary>
     public void ReportOutcome(string alias, RemoteApiReport report)
@@ -829,8 +949,10 @@ public class FederationStatusService : IHostedService
             state.State = FederationInstanceState.InvalidCredentials;
             state.LastError = report.Error;
         }
-        else if (report.Error == "unreachable" || report.Error == "timeout")
+        else
         {
+            // Any other failure (unreachable, timeout, 5xx/4xx from the remote):
+            // record it. InvalidCredentials is sticky — only a success clears it.
             if (state.State != FederationInstanceState.InvalidCredentials)
             {
                 state.State = FederationInstanceState.Offline;
@@ -849,63 +971,129 @@ public class FederationStatusService : IHostedService
     public Task StartAsync(CancellationToken cancellationToken)
     {
         _cts = new CancellationTokenSource();
-        _ = Task.Run(() => ProbeLoopAsync(_cts.Token), CancellationToken.None);
+        _loopTask = Task.Run(() => ProbeLoopAsync(_cts.Token), CancellationToken.None);
         return Task.CompletedTask;
     }
 
     /// <inheritdoc />
-    public Task StopAsync(CancellationToken cancellationToken)
+    public async Task StopAsync(CancellationToken cancellationToken)
     {
         _cts?.Cancel();
-        return Task.CompletedTask;
+        if (_loopTask is not null)
+        {
+            try
+            {
+                await _loopTask.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // expected at shutdown
+            }
+        }
+
+        _cts?.Dispose();
+        _cts = null;
+    }
+
+    /// <summary>
+    /// Probes one instance once (testable entry point of the loop body):
+    /// unauthenticated GET /System/Info/Public, updates state and the due-time map.
+    /// </summary>
+    /// <param name="instance">The instance to probe.</param>
+    /// <param name="ct">Cancellation.</param>
+    public Task ProbeOnceAsync(FederationInstance instance, CancellationToken ct)
+        => ProbeInstanceAsync(instance, ct);
+
+    /// <summary>Gets when the given alias is due for its next probe (test surface for backoff assertions).</summary>
+    /// <param name="alias">Instance alias.</param>
+    /// <returns>The earliest allowed next probe time, or null if never probed.</returns>
+    public DateTimeOffset? NextProbeDue(string alias)
+        => _nextProbe.TryGetValue(alias, out var due) ? due : null;
+
+    /// <summary>Probes one instance; updates the state and the per-alias due time.</summary>
+    private async Task ProbeInstanceAsync(FederationInstance instance, CancellationToken ct)
+    {
+        var serverUrl = instance.ServerUrl.TrimEnd('/');
+        try
+        {
+            // Invariant 11: unauthenticated probe only.
+            using var response = await _httpClient.GetAsync(serverUrl + "/System/Info/Public", ct).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                // A non-2xx from a reachable remote is "remote returned {code}",
+                // distinct from "unreachable" (no connection at all). The
+                // two-arg ctor sets StatusCode (the one-arg one does not).
+                throw new FederationException($"Remote server returned {(int)response.StatusCode} for {serverUrl}/System/Info/Public", (int)response.StatusCode);
+            }
+
+            await using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+            var info = await JsonSerializer.DeserializeAsync<PublicSystemInfo>(stream, FederationJsonOptions.Options, ct).ConfigureAwait(false);
+            var state = _states.GetOrAdd(instance.Alias, a => new InstanceStatus(a));
+            if (state.State != FederationInstanceState.InvalidCredentials)
+            {
+                state.State = FederationInstanceState.Online;
+            }
+
+            state.RemoteServerName = info?.ServerName;
+            state.RemoteVersion = info?.Version;
+            state.LastCheckedUtc = _clock();
+            state.ConsecutiveFailures = 0;
+            _nextProbe[instance.Alias] = _clock() + _backoffSteps[0];
+        }
+        catch (Exception ex) when (!(ex is OperationCanceledException && ct.IsCancellationRequested))
+        {
+            var state = _states.GetOrAdd(instance.Alias, a => new InstanceStatus(a));
+            if (state.State != FederationInstanceState.InvalidCredentials)
+            {
+                state.State = FederationInstanceState.Offline;
+            }
+
+            state.LastError = ex switch
+            {
+                FederationException { StatusCode: not null } f => $"remote returned {f.StatusCode}",
+                TaskCanceledException => "timeout",
+                HttpRequestException => "unreachable",
+                _ => "probe failed"
+            };
+            state.LastCheckedUtc = _clock();
+            // Back off on every failure kind (refused, timeout, 5xx), not just some:
+            // a non-2xx remote that never recovers must not be re-probed every 5 s.
+            var step = Math.Min(state.ConsecutiveFailures, _backoffSteps.Length - 1);
+            _nextProbe[instance.Alias] = _clock() + _backoffSteps[step];
+            state.ConsecutiveFailures++;
+        }
     }
 
     private async Task ProbeLoopAsync(CancellationToken ct)
     {
-        var nextProbe = new Dictionary<string, DateTimeOffset>(); // alias → earliest next probe
+        // Per-instance offset so instances don't synchronize (spec): a never-seen
+        // alias gets its due time seeded with a hash-derived offset and is
+        // skipped this cycle (first real probe on the next one).
         while (!ct.IsCancellationRequested)
         {
             foreach (var instance in _configProvider().Instances.Where(i => !string.IsNullOrWhiteSpace(i.ServerUrl)))
             {
                 if (ct.IsCancellationRequested) { break; }
 
-                if (nextProbe.TryGetValue(instance.Alias, out var due) && _clock() < due)
+                if (!_nextProbe.TryGetValue(instance.Alias, out var due))
+                {
+                    var offset = TimeSpan.FromSeconds(Math.Abs(instance.Alias.GetHashCode()) % 15);
+                    _nextProbe[instance.Alias] = _clock() + offset;
+                    continue;
+                }
+
+                if (_clock() < due)
                 {
                     continue;
                 }
 
                 try
                 {
-                    // Invariant 11: unauthenticated probe only.
-                    using var response = await _httpClient.GetAsync(instance.ServerUrl.TrimEnd('/') + "/System/Info/Public", ct).ConfigureAwait(false);
-                    response.EnsureSuccessStatusCode();
-                    await using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
-                    var info = await JsonSerializer.DeserializeAsync<PublicSystemInfo>(stream, FederationJsonOptions.Options, ct).ConfigureAwait(false);
-                    var state = _states.GetOrAdd(instance.Alias, a => new InstanceStatus(a));
-                    if (state.State != FederationInstanceState.InvalidCredentials)
-                    {
-                        state.State = FederationInstanceState.Online;
-                    }
-
-                    state.RemoteServerName = info?.ServerName;
-                    state.RemoteVersion = info?.Version;
-                    state.LastCheckedUtc = _clock();
-                    state.ConsecutiveFailures = 0;
-                    nextProbe[instance.Alias] = _clock() + _backoffSteps[0];
+                    await ProbeInstanceAsync(instance, ct).ConfigureAwait(false);
                 }
-                catch (Exception ex) when (!(ex is OperationCanceledException && ct.IsCancellationRequested))
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
-                    var state = _states.GetOrAdd(instance.Alias, a => new InstanceStatus(a));
-                    if (state.State != FederationInstanceState.InvalidCredentials)
-                    {
-                        state.State = FederationInstanceState.Offline;
-                    }
-
-                    state.LastError = ex is HttpRequestException or TaskCanceledException ? "unreachable" : "probe failed";
-                    state.LastCheckedUtc = _clock();
-                    var step = Math.Min(state.ConsecutiveFailures, _backoffSteps.Length - 1);
-                    nextProbe[instance.Alias] = _clock() + _backoffSteps[step];
-                    state.ConsecutiveFailures++;
+                    return;
                 }
             }
 
@@ -915,7 +1103,9 @@ public class FederationStatusService : IHostedService
 }
 ```
 
-`InstanceStatus` (same file): `Alias`, `State`, `LastError` (string?), `LastCheckedUtc` (DateTimeOffset?), `LastAuthenticatedUtc` (DateTimeOffset?), `RemoteServerName`, `RemoteVersion` (string?), `ConsecutiveFailures` (int, internal). XML-doc everything public.
+`InstanceStatus` (same file; constructor `public InstanceStatus(string alias)` sets `Alias = alias; Channels = Array.Empty<string>();`): `Alias`, `State`, `LastError` (string?), `LastCheckedUtc` (DateTimeOffset?), `LastAuthenticatedUtc` (DateTimeOffset?), `RemoteServerName`, `RemoteVersion` (string?), `ServerUrl` (string?, from `RegisterInstance`), `Username` (string?, from `RegisterInstance`), `Channels` (IReadOnlyList<string>, non-null, from `RegisterChannels`), `ConsecutiveFailures` (int, internal). XML-doc everything public.
+
+Per-instance probe offset (spec: "per-instance offset so instances don't synchronize"): implemented in `ProbeLoopAsync` only — when an alias has no entry in `_nextProbe` yet, seed it with `_clock() + offset` where `offset = TimeSpan.FromSeconds(Math.Abs(alias.GetHashCode()) % 15)` and **skip** the probe that cycle (the instance gets probed on the next one). `ProbeInstanceAsync`/`ProbeOnceAsync` therefore never apply the offset, keeping the tests' exact due-time assertions valid (`clock.Now + 30 s` after first failure, `+ 60 s` after the second, …).
 
 - [ ] **Step 1: Write failing tests** — `FederationStatusServiceTests.cs`:
 
@@ -979,6 +1169,28 @@ public class FederationStatusServiceTests
     }
 
     [Fact]
+    public async Task ProbeOnce_503_MarksOfflineAndBacksOffLikeRefused()
+    {
+        // Spec: 5xx from the probe also backs off — a non-2xx remote must not
+        // be re-probed on every loop tick, and it is classified as a remote
+        // error ("remote returned 503"), not "unreachable".
+        var handler = new FakeHttpMessageHandler();
+        handler.Add(
+            req => req.RequestUri!.AbsolutePath == "/System/Info/Public",
+            string.Empty,
+            HttpStatusCode.ServiceUnavailable);
+        var service = Create(handler, out _);
+        var instance = Instance();
+
+        await service.ProbeOnceAsync(instance, CancellationToken.None);
+
+        var state = service.Snapshot().Single();
+        Assert.Equal(FederationInstanceState.Offline, state.State);
+        Assert.Equal("remote returned 503", state.LastError);
+        Assert.NotNull(service.NextProbeDue("paul"));
+    }
+
+    [Fact]
     public async Task ProbeOnce_Success_DoesNotClearInvalidCredentials()
     {
         // 401 from an authenticated call is definitive: a green public-info probe
@@ -1026,7 +1238,7 @@ public class FederationStatusServiceTests
         Assert.NotEmpty(service.Snapshot());
     }
 
-    /// <summary>Fixed clock for deterministic backoff assertions.</summary>
+    /// <summary>Fixed clock for deterministic backoff assertions; stays put unless `Advance` is called — `ProbeOnceAsync` must never advance it.</summary>
     internal sealed class FakeClock
     {
         public FakeClock(DateTimeOffset start) => Now = start;
@@ -1037,21 +1249,13 @@ public class FederationStatusServiceTests
     }
 
 }
-
-/// <summary>Shared handler that always throws HttpRequestException (remote down).</summary>
-internal sealed class ThrowingHandler : HttpMessageHandler
-{
-    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
-        => throw new HttpRequestException("connection refused");
-}
 ```
 
-(Top-level in the test file, outside the test class — one definition reused by Tasks 1, 4, 5; all references use `new ThrowingHandler()` directly since they share the namespace.)
+(`ThrowingHandler` is already defined top-level in `RemoteApiClientTests.cs` by Task 1 — the same test assembly/namespace, so it is visible here.)
 
 Notes:
 - `FederationStatusService` constructor for production (Task 6 wiring): `(Func<PluginConfiguration>, HttpClient, ILogger)` with optional `Func<DateTimeOffset>? clock = null`. The loop's own delay stays real — tests never enter it (`StartStop_SmokeTest` just proves lifecycle does not throw).
-- `ThrowingHandler` is defined **once** at the end of this test file (top-level, outside the test class, shared namespace); Tasks 1 and 5 reference it without redefining it.
-- `ProbeOnceAsync` and `NextProbeDue` are **public** (the repo has no `InternalsVisibleTo`; public surface of the service class is fine — the controller lives in the same assembly).
+- `ProbeOnceAsync` and `NextProbeDue` are **public** (the repo has no `InternalsVisibleTo`; public surface of the service class is fine — the controller lives in the same assembly). The due-time map is a **member** (`ConcurrentDictionary<string, DateTimeOffset>`), not loop-local — `ProbeOnceAsync` reads/writes it, `NextProbeDue` exposes it, and the sketch's loop-local `nextProbe` variable must be replaced by that member.
 
 - [ ] **Step 2: Run — expect compile failure.**
 - [ ] **Step 3: Implement** `src/FederationStatusService.cs` (code sketch above; refine to the `ProbeOnceAsync` shape for testability).
@@ -1127,13 +1331,16 @@ public class FederationController : ControllerBase
                 s.LastCheckedUtc,
                 s.LastAuthenticatedUtc,
                 s.RemoteServerName,
-                s.RemoteVersion
+                s.RemoteVersion,
+                s.Channels
             })
             .ToList());
 
     /// <summary>
     /// Tests credentials against one remote: exactly one login and views fetch with
-    /// a throwaway client (never the persistent one — invariant 2).
+    /// a throwaway client (never the persistent one — invariant 2). The outcome is
+    /// also fed to the status service (a failed test sets InvalidCredentials; a
+    /// successful test clears it).
     /// </summary>
     /// <param name="request">Instance data (alias/server/username/password as entered, not necessarily saved).</param>
     /// <returns>ok + libraryCount, or a reason; wrong credentials count exactly one failed login on the remote.</returns>
@@ -1148,25 +1355,49 @@ public class FederationController : ControllerBase
         }
 
         using var client = _testClientFactory();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10)); // bounded: a stalled remote must not hang the dashboard
         try
         {
-            var userId = await client.ConfigureAsync(request.Alias ?? "federation", request.ServerUrl.TrimEnd('/'), request.Username, request.Password, CancellationToken.None).ConfigureAwait(false);
-            var views = await client.GetViewsAsync(userId, CancellationToken.None).ConfigureAwait(false);
+            var userId = await client.ConfigureAsync(request.Alias ?? "federation", request.ServerUrl.TrimEnd('/'), request.Username, request.Password, cts.Token).ConfigureAwait(false);
+            var views = await client.GetViewsAsync(userId, cts.Token).ConfigureAwait(false);
             var libraryCount = views.Items.Count(v => v.Type == MediaBrowser.Model.Dto.BaseItemKind.CollectionFolder);
+            ReportTestOutcome(request.Alias, true, null);
             return Ok(new { ok = true, libraryCount });
         }
         catch (FederationException ex) when (ex.StatusCode is 401 or 403)
         {
+            ReportTestOutcome(request.Alias, false, "InvalidCredentials");
             return Ok(new { ok = false, reason = "InvalidCredentials" });
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
         {
+            ReportTestOutcome(request.Alias, false, "Unreachable");
             return Ok(new { ok = false, reason = "Unreachable" });
         }
-        catch (FederationException)
+        catch (Exception)
         {
+            // Catch-all: any other failure (e.g. FederationException with null
+            // StatusCode — "Login ... returned no access token", malformed JSON,
+            // invalid Uri) becomes a clean JSON error, not a raw 500.
+            ReportTestOutcome(request.Alias, false, "ServerError");
             return Ok(new { ok = false, reason = "ServerError" });
         }
+    }
+
+    private void ReportTestOutcome(string? alias, bool ok, string? reason)
+    {
+        // TestCredentials may run for an unsaved (new) alias: only report to the
+        // status service for aliases it already tracks.
+        if (string.IsNullOrWhiteSpace(alias))
+        {
+            return;
+        }
+
+        _status.ReportOutcome(
+            alias,
+            ok
+                ? new RemoteApiReport(true, null, false)
+                : new RemoteApiReport(false, reason, reason == "InvalidCredentials"));
     }
 }
 
@@ -1194,6 +1425,7 @@ Notes:
 - [ ] **Step 1: Write failing tests** — `FederationControllerTests.cs`. The controller is testable by direct instantiation (plain `ControllerBase`, no host needed):
 
 ```csharp
+using Microsoft.AspNetCore.Authorization;
 public class FederationControllerTests
 {
     private static readonly ILogger Logger = NullLogger.Instance;
@@ -1249,7 +1481,9 @@ public class FederationControllerTests
             req => req.Method == HttpMethod.Post && req.RequestUri!.AbsolutePath == "/Users/AuthenticateByName",
             string.Empty,
             HttpStatusCode.Unauthorized);
-        var controller = new FederationController(CreateStatus(), () => new RemoteApiClient(new HttpClient(handler)));
+        var status = CreateStatus();
+        status.RegisterInstance(new FederationInstance { Alias = "paul", ServerUrl = "https://remote.example.com:8920", Username = "paul", Password = "x" });
+        var controller = new FederationController(status, () => new RemoteApiClient(new HttpClient(handler)));
 
         var result = await controller.TestCredentials(new TestCredentialsRequest("paul", "https://remote.example.com:8920", "paul", "wrong"));
 
@@ -1257,6 +1491,9 @@ public class FederationControllerTests
         var json = JsonSerializer.Serialize(value.Value!, FederationJsonOptions.Options);
         Assert.Contains("InvalidCredentials", json, StringComparison.Ordinal);
         Assert.Equal(1, handler.Requests.Count);
+        // The failed test also updates the status service (spec phase 2).
+        var row = status.Snapshot().Single(s => s.Alias == "paul");
+        Assert.Equal(FederationInstanceState.InvalidCredentials, row.State);
     }
 
     [Fact]
@@ -1312,15 +1549,28 @@ var status = new FederationStatusService(
     new HttpClient { Timeout = TimeSpan.FromSeconds(5) },
     logger);
 
+// Register every instance so status rows carry ServerUrl/Username from startup
+// (the probe loop alone would only give it state, not the identifying fields).
+foreach (var instance in config.Instances)
+{
+    status.RegisterInstance(instance);
+}
+
 var factory = new FederationChannelFactory(
     () => new RemoteApiClient(new HttpClient { Timeout = TimeSpan.FromSeconds(15) }),
     logger,
     viewsCache: viewsCache,
-    clientSetup: (client, alias) => client.SetReporter(report => status.ReportOutcome(alias, report)));
+    clientSetup: (client, alias) => client.SetReporter(report => status.ReportOutcome(alias, report)),
+    status: status); // so the factory can feed channel names + cache paths into the status service
 
 // after channels were created (existing code):
 serviceCollection.AddSingleton(status);
 serviceCollection.AddSingleton<IHostedService>(status);
+
+// The controller's test-credentials factory: a throwaway client per test
+// (fresh DeviceId via ConfigureAsync — invariant 2 is satisfied).
+serviceCollection.AddSingleton<Func<RemoteApiClient>>(
+    sp => () => new RemoteApiClient(new HttpClient { Timeout = TimeSpan.FromSeconds(15) }));
 ```
 
 `IHostedService` requires `using Microsoft.Extensions.Hosting;` — available through the shared framework (source target: transitive; container target: after Task 5's FrameworkReference).
@@ -1335,7 +1585,7 @@ await d.commit("feat: wire status service, views cache and outcome reporters int
 
 ---
 
-### Task 7: Embedded dashboard page (Settings + Status tabs)
+### Task 7: Embedded dashboard page (status panel + settings form)
 
 **Files:**
 - Create: `src/Web/config.html` (single self-contained file: HTML + inline JS; the host pattern embeds one HTML resource — TMDb/MusicBrainz keep JS inline in the html; keep one file, no separate config.js, matching the host examples and minimizing csproj churn)
@@ -1343,7 +1593,7 @@ await d.commit("feat: wire status service, views cache and outcome reporters int
 - Modify: `Jellyfin.Plugin.Federation.csproj` + `container/...csproj` (embedded resource)
 - Test: `tests/Jellyfin.Plugin.Federation.Tests/PluginPageTests.cs`
 
-**Design:** Host page pattern (verified from `MusicBrainz/Configuration/config.html`): `data-role="page"` root, `data-require="emby-input,emby-button"`, `pageshow` → `ApiClient.getPluginConfiguration(pluginId)`, form submit → `ApiClient.updatePluginConfiguration(pluginId, config).then(Dashboard.processPluginConfigurationUpdateResult)`. Status tab polls `GET Federation/Status` via `ApiClient.getUrl`-based fetch — the ApiClient AJAX helper: `ApiClient.ajax({ url: ApiClient.getUrl('Federation/Status'), type: 'GET' })` (apiclient.d.ts: `ajax(request: any): Promise<any>`, `getUrl(name, params)`). Restart: `ApiClient.ajax({ url: ApiClient.getUrl('System/Restart'), type: 'POST' })`.
+**Design:** Host page pattern (verified from `MusicBrainz/Configuration/config.html`): `data-role="page"` root, `data-require="emby-input,emby-button"`, `pageshow` → `ApiClient.getPluginConfiguration(pluginId)`, form submit → `ApiClient.updatePluginConfiguration(pluginId, config).then(Dashboard.processPluginConfigurationUpdateResult)`. The status panel polls `GET Federation/Status` via `ApiClient.getUrl`-based fetch — the ApiClient AJAX helper: `ApiClient.ajax({ url: ApiClient.getUrl('Federation/Status'), type: 'GET' })` (apiclient.d.ts: `ajax(request: any): Promise<any>`, `getUrl(name, params)`). Restart: `ApiClient.ajax({ url: ApiClient.getUrl('System/Restart'), type: 'POST' })`.
 
 `config.html` complete content:
 
@@ -1414,11 +1664,17 @@ await d.commit("feat: wire status service, views cache and outcome reporters int
                 });
                 var testBtn = el('button', { 'is': 'emby-button', 'type': 'button', 'class': 'raised', 'data-idx': instance.__idx });
                 testBtn.textContent = 'Test connection';
-                testBtn.addEventListener('click', function () { testConnection(instance.__idx); });
+                testBtn.addEventListener('click', function () {
+                    testConnection(parseInt(this.getAttribute('data-idx'), 10));
+                });
                 container.appendChild(testBtn);
                 var removeBtn = el('button', { 'is': 'emby-button', 'type': 'button', 'class': 'raised', 'data-idx': instance.__idx });
                 removeBtn.textContent = 'Remove';
                 removeBtn.addEventListener('click', function () {
+                    // Re-sync from the DOM first so unsaved edits in any row are
+                    // kept, and the splice index (valid for the current render)
+                    // matches the collected array.
+                    window.__fedInstances = collectInstances();
                     container.parentNode.removeChild(container);
                     window.__fedInstances.splice(instance.__idx, 1);
                     renderInstances();
@@ -1466,6 +1722,7 @@ await d.commit("feat: wire status service, views cache and outcome reporters int
                 var instances = collectInstances();
                 var inst = instances[idx];
                 var resultEl = document.getElementById('fed-test-' + idx);
+                if (!inst.ServerUrl) { resultEl.textContent = 'Server URL is required.'; return; }
                 var error = validate([inst]);
                 if (error) { resultEl.textContent = error; return; }
                 resultEl.textContent = 'Testing...';
@@ -1494,12 +1751,23 @@ await d.commit("feat: wire status service, views cache and outcome reporters int
                     });
                     line.appendChild(dot);
                     line.appendChild(el('strong', {}, row.Alias));
-                    line.appendChild(el('span', { 'class': 'fieldDescription' },
-                        row.State + (row.RemoteServerName ? ' — ' + row.RemoteServerName + ' ' + (row.RemoteVersion || '') : '')
-                        + (row.LastError ? ' (last error: ' + row.LastError + ')' : '')));
-                    host.appendChild(line);
+                    var meta = row.State + (row.RemoteServerName ? ' — ' + row.RemoteServerName + ' ' + (row.RemoteVersion || '') : '')
+                        + (row.LastError ? ' (last error: ' + row.LastError + ')' : '')
+                        + (row.LastAuthenticatedUtc ? ' · last authenticated: ' + row.LastAuthenticatedUtc : '');
+                    // Spec phase 3: no channels yet + remote not online → hint that
+                    // a restart creates them once B is reachable.
+                    if ((!row.Channels || !row.Channels.length) && row.State !== 'Online' && row.State !== 'InvalidCredentials') {
+                        meta += ' — no channels yet; restart A once B is reachable to create them';
+                    }
+                    line.appendChild(el('span', { 'class': 'fieldDescription' }, meta));
+                    table.appendChild(line);
+                    if (row.Channels && row.Channels.length) {
+                        table.appendChild(el('div', { 'class': 'fieldDescription', 'style': 'margin-left:1.2em;' },
+                            row.Channels.join(', ')));
+                    }
                 });
-                if (!rows.length) { host.appendChild(el('div', { 'class': 'fieldDescription' }, 'No instances configured.')); }
+                if (!rows.length) { table.appendChild(el('div', { 'class': 'fieldDescription' }, 'No instances configured.')); }
+                host.appendChild(table);
             }
 
             function refreshStatus() {
@@ -1509,21 +1777,28 @@ await d.commit("feat: wire status service, views cache and outcome reporters int
 
             document.querySelector('.federationConfigPage')
                 .addEventListener('pageshow', function () {
-                    Dashboard.showLoadingMsg();
+                    // Clear a previous poller (revisits must not stack intervals).
+                    if (window.__fedStatusTimer) { window.clearInterval(window.__fedStatusTimer); }
                     refreshStatus();
                     window.__fedStatusTimer = window.setInterval(refreshStatus, 5000);
+                    Dashboard.showLoadingMsg();
                     ApiClient.getPluginConfiguration(FederationPluginConfig.uniquePluginId).then(function (config) {
                         window.__fedInstances = (config.Instances || []).map(function (i) {
                             return { Alias: i.Alias, ServerUrl: i.ServerUrl, Username: i.Username, Password: i.Password };
                         });
                         renderInstances();
                         Dashboard.hideLoadingMsg();
+                    }, function () {
+                        Dashboard.hideLoadingMsg();
+                        document.getElementById('saveError').textContent = 'Failed to load configuration.';
                     });
                 });
 
 
             document.getElementById('addInstanceBtn')
                 .addEventListener('click', function () {
+                    // Keep any unsaved edits in the currently rendered rows.
+                    window.__fedInstances = collectInstances();
                     window.__fedInstances.push({ Alias: '', ServerUrl: '', Username: '', Password: '' });
                     renderInstances();
                 });
@@ -1545,7 +1820,13 @@ await d.commit("feat: wire status service, views cache and outcome reporters int
                         ApiClient.updatePluginConfiguration(FederationPluginConfig.uniquePluginId, config).then(function () {
                             Dashboard.processPluginConfigurationUpdateResult();
                             document.getElementById('restartSection').style.display = '';
+                        }, function () {
+                            Dashboard.hideLoadingMsg();
+                            msg.textContent = 'Save failed.';
                         });
+                    }, function () {
+                        Dashboard.hideLoadingMsg();
+                        msg.textContent = 'Save failed.';
                     });
 
                     e.preventDefault();
@@ -1581,7 +1862,8 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
             {
                 Name = "Jellyfin Federation",
                 DisplayName = "Jellyfin Federation",
-                EmbeddedResourcePath = GetType().Assembly.GetName().Name + ".Web.config.html"
+                EmbeddedResourcePath = GetType().Assembly.GetName().Name + ".Web.config.html",
+                EnableInMainMenu = false
             }
         };
 }
@@ -1603,10 +1885,12 @@ For the container csproj the path is relative to its own directory (`container/`
 <EmbeddedResource Include="src/Web/config.html" LogicalName="Jellyfin.Plugin.Federation.Web.config.html" />
 ```
 
-- [ ] **Step 1: Write failing test** — `PluginPageTests.cs`:
+- [ ] **Step 1: Write failing tests** — `PluginPageTests.cs` (add the config round-trip test, see note below):
 
 
 ```csharp
+using System.Text.Json;
+using Jellyfin.Plugin.Federation.Configuration;
 public class PluginPageTests
 {
     [Fact]
@@ -1634,12 +1918,47 @@ public class PluginPageTests
         Assert.Contains("30c06888-1907-48cc-957a-6d83e86a39d7", html); // uniquePluginId matches Plugin.Id
         Assert.DoesNotContain("TBD", html, StringComparison.Ordinal);
     }
+
+    // Spec "Testing" table: config round-trip. The host's plugin-config endpoints
+    // (PluginsController) serialize with JsonDefaults.Options — PascalCase
+    // (PropertyNamingPolicy = null). The page JS must use exactly those keys;
+    // a rename in either direction would silently produce an empty form or drop
+    // fields on save, so pin the contract here.
+    [Fact]
+    public void PluginConfiguration_RoundTripsThroughHostJsonContract()
+    {
+        var config = new PluginConfiguration();
+        config.Instances.Add(new FederationInstance
+        {
+            Alias = "paul",
+            ServerUrl = "https://remote.example.com:8920",
+            Username = "paul",
+            Password = "secret"
+        });
+
+        var json = JsonSerializer.Serialize(config, Jellyfin.Extensions.Json.JsonDefaults.Options);
+
+        // The keys the page JS reads and writes (config.Instances / i.Alias / ...).
+        Assert.Contains("\"Instances\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"Alias\":\"paul\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"ServerUrl\":\"https://remote.example.com:8920\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"Username\":\"paul\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"Password\":\"secret\"", json, StringComparison.Ordinal);
+
+        var roundTripped = JsonSerializer.Deserialize<PluginConfiguration>(json, Jellyfin.Extensions.Json.JsonDefaults.Options);
+        Assert.NotNull(roundTripped);
+        var inst = Assert.Single(roundTripped!.Instances);
+        Assert.Equal("paul", inst.Alias);
+        Assert.Equal("https://remote.example.com:8920", inst.ServerUrl);
+        Assert.Equal("paul", inst.Username);
+        Assert.Equal("secret", inst.Password);
+    }
 }
 ```
 
 - [ ] **Step 2: Run — fail** (no `IHasWebPages`, no resource).
 - [ ] **Step 3: Implement** — create `src/Web/config.html` (content above, verbatim and final), modify `Plugin.cs`, add `EmbeddedResource` items with `LogicalName` to both csprojs.
-- [ ] **Step 4: Run new tests (3 PASS) + full suite + both builds.** Commit:
+- [ ] **Step 4: Run new tests (4 PASS) + full suite + both builds.** Commit:
 
 ```python
 d = await commit.draft()
@@ -1687,7 +2006,9 @@ Replace in **Limitations (V1)** the lines:
     final deduped channel names) and the factory falls back to it **only** when
     the startup login fails transiently — never on definitive 401/403, never
     from TestCredentials (unsaved credentials must not pollute the cache). Cache
-    entries are keyed by `sha256(alias|trimmed serverUrl)`.
+    entries are keyed by `sha256(alias|trimmed serverUrl|username)` — the
+    username is in the key so a credential rotation does not rebuild the
+    *previous* user's library set.
 ```
 
 Also extend the "No new dependencies" sentence in Code Style with: `...; the ASP.NET Core shared framework (Microsoft.AspNetCore.App) is referenced for the plugin's MVC controller and hosted service — it is loaded by the host at runtime, and the container csproj must declare the FrameworkReference explicitly (HintPath DLL references do not flow FrameworkReferences).`
@@ -1723,6 +2044,6 @@ dotnet build -c Release container/Jellyfin.Plugin.Federation.Container.csproj
 ```
 Expected: all tests pass, both builds 0 errors.
 
-- [ ] **Step 2: Manual smoke (web surface)** — deploy the container DLL per AGENTS.md to the test server, restart, open Dashboard → Plugins → Jellyfin Federation. Verify: instance form loads saved config; Test returns library count; Save → restart banner appears; Restart now triggers a restart; Status tab shows state/version; after stopping the remote, Status shows Offline within ~30–60 s and the channels still appear in the sidebar (cached views). Record deviations; fix and re-run.
+- [ ] **Step 2: Manual smoke (web surface)** — deploy the container DLL per AGENTS.md to the test server, restart, open Dashboard → Plugins → Jellyfin Federation. Verify: instance form loads saved config; Test returns library count; Save → restart banner appears; Restart now triggers a restart; status panel shows state/version/channels; after stopping the remote, Status shows Offline within ~30–60 s and the channels still appear in the sidebar (cached views); an instance that is down at startup **without** a cache shows the "no channels yet; restart A once B is reachable" hint. Record deviations; fix and re-run.
 
 - [ ] **Step 3: Final commit** of any fixes; then update `docs/design.md` status line if needed.
