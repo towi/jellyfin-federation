@@ -29,6 +29,7 @@ Scope decision (user, 2026-11-22): *all three phases in one spec*; restart model
 | jellyfin-web loads plugin pages **inline** into the dashboard (not an iframe); the page JS runs with the authenticated dashboard `ApiClient` | `src/components/ServerContentPage.tsx` + `apps/dashboard/routes/routes.tsx:48-49` (`view='/web/configurationpage'`) |
 | The host serves plugin config via `GET/POST /Plugins/{id}/Configuration`, persisting through `BasePlugin.SaveConfiguration` (same XML file this plugin already uses) | `Jellyfin.Api/Controllers/PluginsController.cs:164-213`; `MediaBrowser.Common/Plugins/BasePluginOfT.cs:155-176` |
 | Plugin assemblies are automatically registered as MVC application parts; a plugin `ControllerBase` subclass just works  | `Emby.Server.Implementations/ApplicationHost.cs:1010` (`GetApiPluginAssemblies`); `Jellyfin.Server/Extensions/ApiServiceCollectionExtensions.cs:158-161` |
+| The host's plugin-config endpoints are **admin-only**: `PluginsController` carries a class-level `[Authorize(Policy = Policies.RequiresElevation)]` covering `GET/POST /Plugins/{id}/Configuration` | `Jellyfin.Api/Controllers/PluginsController.cs:25-27`                                                          |
 | The default auth policy requires authentication only — **not** admin; elevation needs an explicit policy | `Jellyfin.Server/Extensions/ApiServiceCollectionExtensions.cs:63-78`; `Jellyfin.Api/Auth/.../DefaultAuthorizationHandler.cs:47-70` |
 | `POST /System/Restart` exists (`LocalAccessOrRequiresElevation`)                        | `Jellyfin.Api/Controllers/SystemController.cs:114-124`                                            |
 | `ChannelManager` receives `IEnumerable<IChannel>` once in its constructor; **no** runtime add/remove API → no hot channel registration | `src/Jellyfin.LiveTv/Channels/ChannelManager.cs:81-95` (`internal IChannel[] Channels`)       |
@@ -134,9 +135,11 @@ the Test-connection button and (b) the persistent client's 401-re-login failure
   "using cached views from {date}", status `Offline`.
 - **Browsing while B is down:** unchanged — the channel manager swallows
   provider exceptions as empty results; the plugin logs (`LogError`) and the
-  status service records the failure (channel failure reporting hooks into the
-  same status service via an injected callback, so the status page reflects
-  real request outcomes, not just probe results).
+  status service records the failure — the reporting callback lives on
+  `RemoteApiClient` itself (set once per instance by the factory), so every
+  authenticated call path (browse, playback info, views) reports outcomes
+  uniformly and `FederationChannel` stays unchanged. The status page thus
+  reflects real request outcomes, not just probe results.
 - **Credentials changed on B (mid-run):** request 401 → re-login → if that
   login also fails 401/403: single attempt, no retry loop (lockout), status
   becomes `InvalidCredentials`, channel errors surface to the client as today.
