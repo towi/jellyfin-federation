@@ -51,6 +51,9 @@ Error sanitization rule (implemented by `SanitizeError` below): report **fixed c
 - [ ] **Step 1: Write failing tests** (append to `RemoteApiClientTests.cs`, before existing helper classes at the end of the file; check the file first for where facts end). Also add the `ThrowingHandler` shown below at the end of the **same file, inside its `namespace Jellyfin.Plugin.Federation.Tests;` block** (alongside the existing `FakeHttpMessageHandler` helper) — Tasks 4 and 5 reference it from the same namespace.
 
 ```csharp
+// Note: these tests reference RemoteApiReport (defined in the src namespace
+// Jellyfin.Plugin.Federation). Add this using at the top of RemoteApiClientTests.cs:
+//   using Jellyfin.Plugin.Federation;
 public class RemoteApiClientPrepareTests
 {
     private static FakeHttpMessageHandler CreateHandler()
@@ -326,7 +329,7 @@ await d.commit("feat: remote client prepare mode, auth tracking, outcome reporte
 - Create: `tests/Jellyfin.Plugin.Federation.Tests/FederationViewsCacheTests.cs`
 - Modify: both csproj (no change needed — SDK default glob picks up new `.cs` in `src/`; container csproj has `../src/**/*.cs` glob. Verify with the builds.)
 
-**Design:** One JSON file per instance under `{CachePath}/federation/{sha256(alias + "|" + serverUrl)[..16]}/views.json`. Content: the view list with final channel names (dedup suffix included) so a cache-built channel is byte-identical to a live one. Written **only from the factory's successful startup path** (never from TestCredentials — unsaved credentials must not pollute the cache; spec line 123). Corrupt/missing file → empty list (treated as absent), never throws.
+**Design:** One JSON file per instance under `{DataPath}/federation/{sha256(alias + "|" + serverUrl + "|" + username)[..16]}/views.json` (username in the key: a credential rotation must not rebuild the *previous* user's library set). Content: the view list with final channel names (dedup suffix included) so a cache-built channel is byte-identical to a live one. Written **only from the factory's successful startup path** (never from TestCredentials — unsaved credentials must not pollute the cache; spec line 123). Corrupt/missing file → empty list (treated as absent), never throws. A failed write (disk full, permissions) is logged and swallowed — a cache problem must never kill live channel creation or be misdiagnosed as a connectivity failure.
 
 ```csharp
 using System;
@@ -351,7 +354,7 @@ public sealed record CachedView(string RemoteLibraryId, string LibraryName, stri
 /// <summary>
 /// Persists the last successfully fetched views per federation instance so channels
 /// can be rebuilt when the remote is unreachable at startup (spec phase 3).
-/// One JSON file per instance under {CachePath}/federation/{key}/views.json.
+/// One JSON file per instance under {DataPath}/federation/{key}/views.json.
 /// </summary>
 public class FederationViewsCache
 {
@@ -363,7 +366,7 @@ public class FederationViewsCache
     /// <summary>
     /// Initializes a new instance of the <see cref="FederationViewsCache"/> class.
     /// </summary>
-    /// <param name="cachePath">Host cache path (IApplicationPaths.CachePath).</param>
+    /// <param name="dataPath">Host data path (IApplicationPaths.DataPath).</param>
     /// <param name="logger">Logger.</param>
     public FederationViewsCache(string dataPath, ILogger logger)
     {
@@ -665,6 +668,20 @@ Careful with the client lifecycle: in the fallback path `client.Prepare` must ha
 - [ ] **Step 1: Write failing tests** — `tests/Jellyfin.Plugin.Federation.Tests/FederationChannelFactoryCacheTests.cs` (new file; copy the `CreateHandler`/`CreateConfig`/`CreateValidInstance` helpers from `FederationChannelFactoryTests.cs`):
 
 ```csharp
+using System;
+using System.IO;
+using System.Linq;
+using System.Net;
+using System.Net.Http;
+using System.Threading;
+using System.Threading.Tasks;
+using Jellyfin.Plugin.Federation;
+using Jellyfin.Plugin.Federation.Configuration;
+using Microsoft.Extensions.Logging.Abstractions;
+using Xunit;
+
+namespace Jellyfin.Plugin.Federation.Tests;
+
 public class FederationChannelFactoryCacheTests
 {
     private static readonly ILogger Logger = NullLogger.Instance;
@@ -1110,6 +1127,19 @@ Per-instance probe offset (spec: "per-instance offset so instances don't synchro
 - [ ] **Step 1: Write failing tests** — `FederationStatusServiceTests.cs`:
 
 ```csharp
+using System;
+using System.Linq;
+using System.Net;
+using System.Net.Http;
+using System.Threading;
+using System.Threading.Tasks;
+using Jellyfin.Plugin.Federation;
+using Jellyfin.Plugin.Federation.Configuration;
+using Microsoft.Extensions.Logging.Abstractions;
+using Xunit;
+
+namespace Jellyfin.Plugin.Federation.Tests;
+
 public class FederationStatusServiceTests
 {
     private static readonly ILogger Logger = NullLogger.Instance;
@@ -1425,7 +1455,22 @@ Notes:
 - [ ] **Step 1: Write failing tests** — `FederationControllerTests.cs`. The controller is testable by direct instantiation (plain `ControllerBase`, no host needed):
 
 ```csharp
+using System.IO;
+using System.Linq;
+using System.Net;
+using System.Net.Http;
+using System.Reflection;
+using System.Text.Json;
+using System.Threading.Tasks;
+using Jellyfin.Plugin.Federation;
+using Jellyfin.Plugin.Federation.Configuration;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Logging.Abstractions;
+using Xunit;
+
+namespace Jellyfin.Plugin.Federation.Tests;
+
 public class FederationControllerTests
 {
     private static readonly ILogger Logger = NullLogger.Instance;
@@ -1538,11 +1583,11 @@ await d.commit("feat: admin-gated status + test-credentials endpoints", ["- Cont
 - Modify: `src/FederationPluginServiceRegistrator.cs`
 - Test: none new (wiring; the pieces are covered). Manual verification in Task 9.
 
-**Design:** The registrator builds `FederationViewsCache` (with `appPaths.CachePath`), constructs `FederationStatusService` with the loaded config provider and a probe `HttpClient` (5 s timeout), and passes the cache to the factory. After channel creation, it registers the status service in DI (as singleton + `IHostedService`) and sets the `RemoteApiClient` reporters: the factory needs a hook — cleanest is a factory callback: `factory.SetClientConfigurator(Action<RemoteApiClient>)` invoked per created client, or the factory constructor takes `Action<RemoteApiClient, string alias>?` clientSetup. **Decision: add an optional constructor parameter `Action<RemoteApiClient, string>? clientSetup = null`** invoked right after `_clientFactory()` in both live and fallback paths:
+**Design:** The registrator builds `FederationViewsCache` (with `appPaths.DataPath`), constructs `FederationStatusService` with the loaded config provider and a probe `HttpClient` (5 s timeout), registers all instances on it (so status rows carry `ServerUrl`/`Username` from startup), and passes the cache + status to the factory (Task 3 added the `viewsCache`/`clientSetup`/`status` constructor parameters). The `clientSetup` hook wires each client's outcome reporter to `status.ReportOutcome(alias, report)`. After channel creation, it registers the status service in DI (as singleton + `IHostedService`) and the throwaway-client factory for the controller's TestCredentials:
 
 ```csharp
 // In RegisterServices, after var config = LoadConfig(...):
-var viewsCache = new FederationViewsCache(appPaths.CachePath, logger);
+var viewsCache = new FederationViewsCache(appPaths.DataPath, logger);
 
 var status = new FederationStatusService(
     () => config, // config is fixed at startup (restart-on-change semantics), so a closure is correct
@@ -1889,8 +1934,15 @@ For the container csproj the path is relative to its own directory (`container/`
 
 
 ```csharp
+using System.IO;
+using System.Reflection;
 using System.Text.Json;
+using Jellyfin.Plugin.Federation;
 using Jellyfin.Plugin.Federation.Configuration;
+using Xunit;
+
+namespace Jellyfin.Plugin.Federation.Tests;
+
 public class PluginPageTests
 {
     [Fact]
