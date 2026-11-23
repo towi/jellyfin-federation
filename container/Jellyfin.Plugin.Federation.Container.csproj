@@ -14,6 +14,13 @@
   <ItemGroup>
     <Compile Include="../src/**/*.cs" />
   </ItemGroup>
+  <!-- The source-checkout target inherits Microsoft.AspNetCore.App transitively
+       through the MediaBrowser.Common project reference; plain HintPath DLL
+       references do not flow FrameworkReferences, so the container target needs
+       this explicitly. Compile-time only — the host loads the shared framework. -->
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
   <ItemGroup>
     <!-- The exact binaries shipped in the linuxserver/jellyfin 12.2.0 container.
          Not copied into the output: the container provides them at runtime.

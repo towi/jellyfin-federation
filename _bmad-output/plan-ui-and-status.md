@@ -96,6 +96,7 @@ context:
 - Task order: Task 4 before Task 3 (compile dependency — Task 3's factory ctor takes `FederationStatusService? status = null`, which does not exist until Task 4). Everything else in Task order 1→9 unchanged.
 - Task 4: plan test `Create` took `FakeHttpMessageHandler` but one test passes `ThrowingHandler` (different class) and captured the `out` param `clock` in a lambda (CS1628). Fixed: `Create` now takes `HttpMessageHandler` and captures `clock` in a local before the lambda. Assertions unchanged.
 - Task 4 (container target): `IHostedService` lives in `Microsoft.Extensions.Hosting.Abstractions`, which the container csproj did not reference (plain HintPath refs don't flow FrameworkReferences). Added `container-refs/Hosting.Abstractions.dll` (from the .NET 10 shared framework the image ships) + a Reference item with the docker-cp re-extraction note.
+- Task 5: added one test beyond the plan (`TestCredentialsRequest_BindsPascalCaseBody`): the page POSTs PascalCase bodies; a silent casing mismatch would 400 every Test click. Controller count 5→6 (total 44+33=77 after Task 7).
 
 ## Plan Change Log
 
