@@ -88,7 +88,7 @@ context:
 - Given the dashboard is open, when a remote is up, then its row shows `Online` with remote version, channel names, and last-authenticated time; when it is down, `Offline` with a fixed-category `lastError` and no raw exception text.
 - Given unsaved credentials in the form, when Test is clicked, then a throwaway client reports `libraryCount` or a fixed reason; the persistent client and any saved status row are untouched; a typo'd alias creates no status row.
 - Given a remote is down at startup but a views cache exists, when the host starts, then the channels appear (token-less) and self-heal via exactly one login when the remote returns.
-- Given `dotnet test -c Release`, when run, then 76 tests pass offline; both csproj targets build.
+- Given `dotnet test -c Release`, when run, then 77 tests pass offline; both csproj targets build.
 
 ## Implementation Notes
 
@@ -97,6 +97,15 @@ context:
 - Task 4: plan test `Create` took `FakeHttpMessageHandler` but one test passes `ThrowingHandler` (different class) and captured the `out` param `clock` in a lambda (CS1628). Fixed: `Create` now takes `HttpMessageHandler` and captures `clock` in a local before the lambda. Assertions unchanged.
 - Task 4 (container target): `IHostedService` lives in `Microsoft.Extensions.Hosting.Abstractions`, which the container csproj did not reference (plain HintPath refs don't flow FrameworkReferences). Added `container-refs/Hosting.Abstractions.dll` (from the .NET 10 shared framework the image ships) + a Reference item with the docker-cp re-extraction note.
 - Task 5: added one test beyond the plan (`TestCredentialsRequest_BindsPascalCaseBody`): the page POSTs PascalCase bodies; a silent casing mismatch would 400 every Test click. Controller count 5→6 (total 44+33=77 after Task 7).
+- Task 9 smoke (two local source-build instances A:8096 / B:8097, `--nowebclient`, plugin DLL deployed to A):
+  - Startup with B up: status `Online`, `mustrum 13.0.0`, channel `paul · Movies` in A; item `fed-test` listed through the channel.
+  - `POST Federation/TestCredentials`: correct pw → `{"ok":true,"libraryCount":1}`; wrong pw → `{"ok":false,"reason":"InvalidCredentials"}`.
+  - B stopped, A restarted: log `paul (...) unreachable at startup; rebuilding 1 channels from cached views`; channel still present; status `Offline` / `lastError: unreachable`.
+  - B restarted, A untouched: probe loop flipped the row to `Online` within ~30 s (5 s interval), no A restart.
+  - Second never-reached instance (`quinn`, 8098, no cache): 4 bounded login retries then skipped, no channel, status `Offline` / `unreachable` / empty `Channels` (the page renders the "no channels yet; restart A once B is reachable" hint for this row).
+  - Host plugin-config API (what the page load/save use): `GET /Plugins/{id}/Configuration` returns PascalCase; `POST` round-trips a second instance into the XML in hand-edited byte-compatible form.
+  - Known cosmetic (matches plan code verbatim): a successful probe does not clear a stale `LastError`; it is cleared on the next successful authenticated request (e.g. first browse/playback) or a successful Test click.
+  - Browser-only checks not run (source build ships no `jellyfin-web`): page rendering, 5 s poll interval, Restart-now button.
 
 ## Plan Change Log
 
@@ -109,7 +118,7 @@ context:
 **Commands:**
 - `dotnet build -c Release` -- expected: 0 errors (source-checkout target)
 - `dotnet build -c Release container/Jellyfin.Plugin.Federation.Container.csproj` -- expected: 0 errors (container target)
-- `dotnet test -c Release` -- expected: 76 pass (44 existing + 32 new), offline
+- `dotnet test -c Release` -- expected: 77 pass (44 existing + 33 new), offline
 
 **Manual checks (if no CLI):**
 - Task 9 of the context plan: deploy container build to a test host, open the dashboard, verify status rows, Test button, and restart flow.
