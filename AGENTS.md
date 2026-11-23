@@ -41,7 +41,12 @@ jellyfin-federation/
 │   ├── MediaSourceMapper.cs               # Remote PlaybackInfo → MediaSourceInfo (proxied URL)
 │   ├── DiagnosticSink.cs                  # DiagnosticTraceListener (ffmpeg et al. → logger)
 │   ├── FederationJsonOptions.cs           # JSON options matching the remote API
-│   └── FederationException.cs
+│   ├── FederationException.cs
+│   ├── FederationViewsCache.cs            # Per-instance last-known-views fallback (DataPath)
+│   ├── FederationStatusService.cs         # Unauthenticated reachability loop (IHostedService)
+│   ├── FederationController.cs            # Admin-gated status + test-credentials endpoints
+│   ├── RemoteApiReport.cs                 # Outcome report from RemoteApiClient
+│   └── Web/config.html                    # Embedded dashboard page (IHasWebPages)
 ├── tests/Jellyfin.Plugin.Federation.Tests/  # xUnit; FakeHttpMessageHandler-based, no network
 ├── container/                             # Alternative csproj: compiles the SAME src/
 │                                          # against the exact DLLs of a Docker image
@@ -115,7 +120,11 @@ running server's assemblies or loading fails.
 - No new dependencies. The plugin may only use what the host already loads
   at runtime (`System.*`, `MediaBrowser.*`, `Jellyfin.Data`,
   `Microsoft.Extensions.*.Abstractions`); see both csproj files for the
-  allowed reference set.
+  allowed reference set. The ASP.NET Core shared framework
+  (`Microsoft.AspNetCore.App`) is referenced for the plugin's MVC controller
+  and hosted service — it is loaded by the host at runtime, and the container
+  csproj must declare the FrameworkReference explicitly (HintPath DLL
+  references do not flow FrameworkReferences).
 - Tests are xUnit, use `FakeHttpMessageHandler` for HTTP, and must run
   without network access. Add a test for every behavior change; the test
   must fail without the fix.
@@ -228,10 +237,29 @@ each one failed in production or review before being pinned this way.
     the dedup suffixes (invariant 4) from churning it. Vary these three
     components in the `DataVersion` tests, not the library name.
 
+11. **The status monitor never authenticates.** `FederationStatusService`
+    only calls the remote's unauthenticated `/System/Info/Public`. A login
+    per probe would create device rows per cycle or (stable DeviceId) revoke
+    tokens baked into persisted image URLs — invariants 2 and 3 apply to
+    *every* code path that talks to the remote, not just startup. Credential
+    validity reaches the status only via failed authenticated requests
+    (reported through `RemoteApiClient`'s outcome reporter) or the UI's
+    one-shot Test button.
+
+12. **The views cache is the only path to channels without a live login.**
+    `FederationViewsCache` persists the last successful view set (including
+    the final deduped channel names) and the factory falls back to it
+    **only** when the startup login fails transiently — never on definitive
+    401/403, never from TestCredentials (unsaved credentials must not
+    pollute the cache). Cache entries are keyed by
+    `sha256(alias|trimmed serverUrl|username)` — the username is in the key
+    so a credential rotation does not rebuild the *previous* user's library
+    set.
+
 ## Testing
 
 ```
-dotnet test -c Release        # 44 tests, all offline
+dotnet test -c Release        # 77 tests, all offline
 ```
 
 - HTTP behavior is tested through `FakeHttpMessageHandler`

@@ -142,6 +142,10 @@ Client → `GET /Videos/{localId}/stream?static=true&MediaSourceId=…` → `Str
 - **Remote unreachable beim PlaybackInfo/Stream:** HTTP-Fehler an den Client; Fehler im Log; RemoteApiClient mit 10s-Timeout, kein Retry-Storm (HttpClient-Default-Polly-less).
 - **Login schlägt fehl (falsches Passwort/Offline):** erster Fetch beim Start schlägt fehl → Plugin-Log-Fehler, keine Channels für die Instanz; Server startet trotzdem. Auch bei 401 mid-run (Token invalidiert, Passwort geändert): Plugin refetcht einmal via Login und wiederholt den Request; bei erneutem Fehl → Fehler an Client + Log.
 - **Config-Reload:** `PluginConfiguration` wird von BasePlugin persistiert; Channels werden aus der Config beim Start gebaut. Änderungen erfordern Neustart des Servers (V1; dokumentiert).
+- **Status & UI (2026-11-22, feat/ui-and-status):** Dashboard page (IHasWebPages,
+  host config API), admin-only Federation controller (status snapshot, one-shot
+  TestCredentials), unauthenticated reachability loop (invariant 11), views cache
+  fallback (invariant 12). Details: docs/pi/specs/2026-11-22-ui-and-status-design.md
 
 ## Testing
 

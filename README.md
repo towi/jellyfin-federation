@@ -63,7 +63,14 @@ cp bin/Release/net10.0/Jellyfin.Plugin.Federation.dll {dataDir}/plugins/Jellyfin
 
 `{dataDir}` is A's `JELLYFIN_DATA_DIR` (e.g. `/var/lib/jellyfin`).
 
-### 4. Configure A
+### 4. Configure A — dashboard (recommended)
+
+In A's dashboard under **Plugins → Jellyfin Federation** you can manage instances
+(alias, server URL, username, password), test each connection, and save. Saving
+writes the same XML file shown below; **changes apply after a server restart** —
+the page offers a *Restart now* button. The same page shows a live status table
+(reachability, remote version, last error, last authenticated contact) for every
+configured instance.
 
 Create `{dataDir}/plugins/configurations/Jellyfin.Plugin.Federation.xml`
 and lock it down — it holds a password
@@ -97,8 +104,10 @@ More `<FederationInstance>` blocks connect more remote servers.
 `paul · Movies`, `paul · Series`, … appear in A's sidebar. Play anything
 from any client of A.
 
-> B must be **reachable when A starts**: the login happens during startup.
-> If B is still down, the channels are missing until the next restart of A.
+> If B is **down when A starts**, its channels are created from the last known
+> libraries (views cache) and start working as soon as B is reachable again.
+> A **newly added** remote that has never been reachable produces no channels
+> until the next restart of A.
 
 ### If the servers are not on one network
 
@@ -111,9 +120,15 @@ changes.
 
 - The remote must be a **separate** server: self-federation is not
   supported (A answers its own startup login with 503).
-- The remote must be reachable **at A's startup**; see above.
+- A remote that is unreachable at A's startup still shows its channels (from
+  the last known libraries) and starts working as soon as it is reachable
+  again. A **newly added** remote that has never been reachable produces no
+  channels until the next restart.
 - Play state stays local; B does not see playback.
 - Config changes require a restart of A.
+- The status monitor never logs in to the remote; it only calls the
+  unauthenticated `/System/Info/Public`. Credential problems are detected
+  through failed authenticated requests or the page's Test button.
 - Search finds remote items only after they have been browsed once.
 - The remote access token is part of the stream URLs, so it appears in
   ffmpeg command lines, A's logs, and `PlaybackInfo` responses (visible to
