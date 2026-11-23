@@ -2,9 +2,11 @@ using System;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Jellyfin.Plugin.Federation;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.MediaInfo;
 using MediaBrowser.Model.Querying;
@@ -280,4 +282,169 @@ public class RemoteApiClientTests
         Assert.Equal(2, itemsRequests.Count);
         Assert.Equal(2, handler.Requests.FindAll(r => r.Method == HttpMethod.Post).Count);
     }
+}
+
+// Note: these tests reference RemoteApiReport (defined in the src namespace
+// Jellyfin.Plugin.Federation), reachable from this namespace without a using.
+public class RemoteApiClientPrepareTests
+{
+    private static FakeHttpMessageHandler CreateHandler()
+    {
+        var handler = new FakeHttpMessageHandler();
+        handler.Add(
+            req => req.Method == HttpMethod.Post && req.RequestUri!.AbsolutePath == "/Users/AuthenticateByName",
+            File.ReadAllText("Data/authenticate-response.json"));
+        return handler;
+    }
+
+    [Fact]
+    public void Prepare_StoresCredentialsWithoutLogin()
+    {
+        // Prepare must not log in: the views-cache fallback builds channels for a
+        // remote that is down; the login happens later via the proactive
+        // empty-token path in GetJsonAsync (first authenticated call).
+        var handler = CreateHandler();
+        var client = new RemoteApiClient(new HttpClient(handler));
+
+        client.Prepare("paul", "https://remote.example.com:8920", "paul", "secret");
+
+        Assert.Equal("https://remote.example.com:8920", client.BaseUrl);
+        Assert.Equal(string.Empty, client.AccessToken);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task GetItems_WithTokenLessClient_LogsInOnceThenFetches()
+    {
+        // Self-heal: a request on a prepared-but-not-logged-in client triggers one
+        // proactive login (empty-token path), then sends the request with the fresh
+        // token — no dead 401 round-trip with an empty ApiKey.
+        var handler = CreateHandler();
+        handler.Add(
+            req => req.RequestUri!.AbsolutePath.StartsWith("/Items", StringComparison.Ordinal),
+            File.ReadAllText("Data/items-response.json"));
+        var client = new RemoteApiClient(new HttpClient(handler));
+        client.Prepare("paul", "https://remote.example.com:8920", "paul", "secret");
+
+        var result = await client.GetItemsAsync("f1e2d3c4b5a60718293a4b5c6d7e8f90", null, null, CancellationToken.None);
+
+        Assert.NotNull(result);
+        var logins = handler.Requests.Count(r => r.RequestUri!.AbsolutePath == "/Users/AuthenticateByName");
+        Assert.Equal(1, logins);
+        var itemsRequest = handler.Requests.Single(r => r.RequestUri!.AbsolutePath.StartsWith("/Items", StringComparison.Ordinal));
+        Assert.Contains("ApiKey=remote-access-token-xyz", itemsRequest.RequestUri!.Query, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GetItems_ConcurrentFirstCalls_ShareOneLogin()
+    {
+        // Spec: single-flight under _loginLock — concurrent first callers of a
+        // token-less client share one login (a duplicate login creates a second
+        // device row on the remote, invariant 2).
+        var handler = CreateHandler();
+        handler.Add(
+            req => req.RequestUri!.AbsolutePath.StartsWith("/Items", StringComparison.Ordinal),
+            File.ReadAllText("Data/items-response.json"));
+        var client = new RemoteApiClient(new HttpClient(handler));
+        client.Prepare("paul", "https://remote.example.com:8920", "paul", "secret");
+
+        await Task.WhenAll(
+            client.GetItemsAsync("f1e2d3c4b5a60718293a4b5c6d7e8f90", null, null, CancellationToken.None),
+            client.GetItemsAsync("f1e2d3c4b5a60718293a4b5c6d7e8f90", null, null, CancellationToken.None),
+            client.GetItemsAsync("f1e2d3c4b5a60718293a4b5c6d7e8f90", null, null, CancellationToken.None));
+
+        Assert.Equal(1, handler.Requests.Count(r => r.RequestUri!.AbsolutePath == "/Users/AuthenticateByName"));
+    }
+
+    [Fact]
+    public async Task GetItems_ReportsSuccessWithTimestamp()
+    {
+        var handler = CreateHandler();
+        handler.Add(
+            req => req.RequestUri!.AbsolutePath.StartsWith("/Items", StringComparison.Ordinal),
+            File.ReadAllText("Data/items-response.json"));
+        var client = new RemoteApiClient(new HttpClient(handler));
+        client.Prepare("paul", "https://remote.example.com:8920", "paul", "secret");
+        var before = DateTimeOffset.UtcNow;
+
+        await client.GetItemsAsync("f1e2d3c4b5a60718293a4b5c6d7e8f90", null, null, CancellationToken.None);
+
+        Assert.NotNull(client.LastAuthenticatedUtc);
+        Assert.True(client.LastAuthenticatedUtc >= before);
+    }
+
+    [Fact]
+    public async Task GetItems_ReportsSanitizedFailureAndSetsAuthFailedOn401Login()
+    {
+        // Wrong password on a token-less client: the login 401s, the request is not
+        // retried, and the reporter sees AuthFailed so the status can show
+        // InvalidCredentials instead of an endless retry loop.
+        var handler = new FakeHttpMessageHandler();
+        handler.Add(
+            req => req.Method == HttpMethod.Post && req.RequestUri!.AbsolutePath == "/Users/AuthenticateByName",
+            string.Empty,
+            HttpStatusCode.Unauthorized);
+        var client = new RemoteApiClient(new HttpClient(handler));
+        client.Prepare("paul", "https://remote.example.com:8920", "paul", "secret");
+        RemoteApiReport? reported = null;
+        client.SetReporter(r => reported = r);
+
+        await Assert.ThrowsAsync<FederationException>(
+            () => client.GetItemsAsync("f1e2d3c4b5a60718293a4b5c6d7e8f90", null, null, CancellationToken.None));
+
+        Assert.NotNull(reported);
+        Assert.False(reported!.Succeeded);
+        Assert.True(reported.AuthFailed);
+        Assert.DoesNotContain("secret", reported.Error, StringComparison.Ordinal);
+        Assert.Single(handler.Requests); // exactly one login attempt
+    }
+
+    [Fact]
+    public async Task ConfigureAsync_ReportsAuthFailureOn401Login()
+    {
+        // Startup with a wrong password: the login 401s and the reporter sees
+        // AuthFailed — otherwise the unauthenticated probe would show Online
+        // while every channel call fails.
+        var handler = new FakeHttpMessageHandler();
+        handler.Add(
+            req => req.Method == HttpMethod.Post && req.RequestUri!.AbsolutePath == "/Users/AuthenticateByName",
+            string.Empty,
+            HttpStatusCode.Unauthorized);
+        var client = new RemoteApiClient(new HttpClient(handler));
+        RemoteApiReport? reported = null;
+        client.SetReporter(r => reported = r);
+
+        await Assert.ThrowsAsync<FederationException>(
+            () => client.ConfigureAsync("paul", "https://remote.example.com:8920", "paul", "wrong", CancellationToken.None));
+
+        Assert.NotNull(reported);
+        Assert.False(reported!.Succeeded);
+        Assert.True(reported.AuthFailed);
+        Assert.Single(handler.Requests); // no retry on definitive failure
+    }
+
+    [Fact]
+    public async Task GetItems_ReportsConnectionFailureWithoutAuthFlag()
+    {
+        var handler = new ThrowingHandler();
+        var client = new RemoteApiClient(new HttpClient(handler));
+        client.Prepare("paul", "https://remote.example.com:8920", "paul", "secret");
+        RemoteApiReport? reported = null;
+        client.SetReporter(r => reported = r);
+
+        await Assert.ThrowsAsync<HttpRequestException>(
+            () => client.GetItemsAsync("f1e2d3c4b5a60718293a4b5c6d7e8f90", null, null, CancellationToken.None));
+
+        Assert.NotNull(reported);
+        Assert.False(reported!.Succeeded);
+        Assert.False(reported.AuthFailed);
+    }
+}
+
+/// <summary>Shared handler that always throws HttpRequestException (remote down). Top-level, shared by Tasks 1, 4, 5.</summary>
+internal sealed class ThrowingHandler : HttpMessageHandler
+{
+    /// <inheritdoc />
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        => throw new HttpRequestException("connection refused");
 }
