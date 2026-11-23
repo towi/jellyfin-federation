@@ -3,14 +3,14 @@ title: 'Federation UI, Status & Down-Resilience'
 type: feature
 ticket: ''
 created: '2026-11-23'
-status: in-progress
+status: built
 baseline_revision: 'c9d3ea522ebb272d4a897b2388e5d22f6f117bf7'
 route: full
 route_source: auto
 risk: medium
-review: ''
-review_source: ''
-lenses_ran: []
+review: quick
+review_source: pinned
+lenses_ran: [quick]
 review_loop_iteration: 0
 context:
   - docs/pi/plans/2026-11-22-ui-and-status.md
@@ -112,6 +112,10 @@ context:
 - Reorder Task 3 ↔ Task 4 during implementation: Task 3's new factory signature references `FederationStatusService` (Task 4), so implementing Task 3 first cannot compile. Known-bad state avoided: red build with CS0246 on `FederationStatusService`. KEEP: the Task 3/Task 4 content itself (sketches, tests) unchanged.
 
 ## Review Triage Log
+
+- Quick lens, finding 1 (`src/FederationStatusService.cs:253` — probe deserializes `/System/Info/Public` with the wrong JSON profile, remote version/server name never captured, test fails): **false**. Disproof: `FederationJsonOptions.Options` sets `PropertyNameCaseInsensitive = true` (`src/FederationJsonOptions.cs:18`), the very line the reviewer claimed was missing — case-insensitive binding matches the remote's PascalCase response regardless of the camelCase naming policy. Re-ran `FederationStatusServiceTests` on the current tree: 6/6 pass, including `ProbeOnce_Online_SetsStateAndPublicInfo`, which the reviewer claimed fails. The Task 9 smoke also observed `RemoteVersion="13.0.0"` on the live status row.
+
+- Quick lens, finding 2 (test-count acceptance criteria internally inconsistent; 34 new tests): **false**. Disproof: the reviewer's own list (5+6+6+5+4+7) sums to 33, not the 34 they state, and the measured suite is exactly 77 (44 at branch base `1f83723c` + 33 new, confirmed by `dotnet test -c Release`). The frozen "44 existing + 32 new = 76" text is the human-owned approval record; the +1 is a documented deviation (Implementation Notes) and is not rewritten into the frozen block. No plan edit is the remedy either way (step-04: reject findings whose fix edits this build's plan).
 
 ## Verification
 
