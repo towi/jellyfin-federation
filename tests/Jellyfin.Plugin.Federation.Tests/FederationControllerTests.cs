@@ -79,7 +79,7 @@ public class FederationControllerTests
         var value = Assert.IsType<OkObjectResult>(result.Result);
         var json = JsonSerializer.Serialize(value.Value!, FederationJsonOptions.Options);
         Assert.Contains("InvalidCredentials", json, StringComparison.Ordinal);
-        Assert.Equal(1, handler.Requests.Count);
+        Assert.Single(handler.Requests); // exactly one login attempt
         // The failed test also updates the status service (spec phase 2).
         var row = status.Snapshot().Single(s => s.Alias == "paul");
         Assert.Equal(FederationInstanceState.InvalidCredentials, row.State);
