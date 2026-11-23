@@ -36,4 +36,10 @@
     <None Remove="tests/**" />
     <None Remove="container/**" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- Dashboard page (IHasWebPages). LogicalName pins the manifest name in
+         both csprojs — the container project's path ("../src/...") would
+         otherwise derive a different one. -->
+    <EmbeddedResource Include="src/Web/config.html" LogicalName="Jellyfin.Plugin.Federation.Web.config.html" />
+  </ItemGroup>
 </Project>

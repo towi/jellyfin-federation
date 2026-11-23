@@ -1,6 +1,8 @@
+using System.Collections.Generic;
 using Jellyfin.Plugin.Federation.Configuration;
 using MediaBrowser.Common.Plugins;
 using MediaBrowser.Common.Configuration;
+using MediaBrowser.Model.Plugins;
 using MediaBrowser.Model.Serialization;
 using Microsoft.Extensions.Logging;
 
@@ -10,7 +12,7 @@ namespace Jellyfin.Plugin.Federation;
 /// Jellyfin Federation plugin: integrates remote Jellyfin servers as channels
 /// and proxies their streams through this server.
 /// </summary>
-public class Plugin : BasePlugin<PluginConfiguration>
+public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
 {
     /// <summary>
     /// Initializes a new instance of the <see cref="Plugin"/> class.
@@ -49,4 +51,17 @@ public class Plugin : BasePlugin<PluginConfiguration>
 
     /// <inheritdoc/>
     public override string Description => "Integrates remote Jellyfin servers as channels with stream proxying.";
+
+    /// <inheritdoc />
+    public IEnumerable<PluginPageInfo> GetPages()
+        => new[]
+        {
+            new PluginPageInfo
+            {
+                Name = "Jellyfin Federation",
+                DisplayName = "Jellyfin Federation",
+                EmbeddedResourcePath = GetType().Assembly.GetName().Name + ".Web.config.html",
+                EnableInMainMenu = false
+            }
+        };
 }

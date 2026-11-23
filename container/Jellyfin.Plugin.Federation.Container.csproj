@@ -14,6 +14,11 @@
   <ItemGroup>
     <Compile Include="../src/**/*.cs" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- Dashboard page (IHasWebPages); LogicalName must match the main
+         csproj so the manifest resource name is identical in both builds. -->
+    <EmbeddedResource Include="../src/Web/config.html" LogicalName="Jellyfin.Plugin.Federation.Web.config.html" />
+  </ItemGroup>
   <!-- The source-checkout target inherits Microsoft.AspNetCore.App transitively
        through the MediaBrowser.Common project reference; plain HintPath DLL
        references do not flow FrameworkReferences, so the container target needs

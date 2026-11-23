@@ -108,8 +108,9 @@ public class FederationController : ControllerBase
     {
         // TestCredentials may run for an unsaved (new) alias — report only for
         // aliases the status service already tracks, so a typo or not-yet-saved
-        // instance cannot create a ghost status row.
-        if (!_status.IsTracked(alias))
+        // instance cannot create a ghost status row. The explicit null/whitespace
+        // check also narrows `alias` to non-null for ReportOutcome below.
+        if (string.IsNullOrWhiteSpace(alias) || !_status.IsTracked(alias))
         {
             return;
         }
