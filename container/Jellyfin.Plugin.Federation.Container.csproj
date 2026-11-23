@@ -49,5 +49,12 @@
       <HintPath>../container-refs/DependencyInjection.Abstractions.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- IHostedService (FederationStatusService). Ships in the image's shared
+         framework; re-extract from a running container if the image is upgraded:
+           docker cp jellyfin:/usr/lib/jellyfin/bin/Microsoft.Extensions.Hosting.Abstractions.dll container-refs/Hosting.Abstractions.dll -->
+    <Reference Include="Microsoft.Extensions.Hosting.Abstractions">
+      <HintPath>../container-refs/Hosting.Abstractions.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 </Project>

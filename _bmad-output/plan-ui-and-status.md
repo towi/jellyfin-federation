@@ -93,8 +93,13 @@ context:
 ## Implementation Notes
 
 - Task 1: plan test code used `reported!.Value.Succeeded` / `reported.Value.X` (Nullable-style); `RemoteApiReport` is a class record, so `.Value` does not exist — removed it in the three affected tests (assertions otherwise verbatim).
+- Task order: Task 4 before Task 3 (compile dependency — Task 3's factory ctor takes `FederationStatusService? status = null`, which does not exist until Task 4). Everything else in Task order 1→9 unchanged.
+- Task 4: plan test `Create` took `FakeHttpMessageHandler` but one test passes `ThrowingHandler` (different class) and captured the `out` param `clock` in a lambda (CS1628). Fixed: `Create` now takes `HttpMessageHandler` and captures `clock` in a local before the lambda. Assertions unchanged.
+- Task 4 (container target): `IHostedService` lives in `Microsoft.Extensions.Hosting.Abstractions`, which the container csproj did not reference (plain HintPath refs don't flow FrameworkReferences). Added `container-refs/Hosting.Abstractions.dll` (from the .NET 10 shared framework the image ships) + a Reference item with the docker-cp re-extraction note.
 
 ## Plan Change Log
+
+- Reorder Task 3 ↔ Task 4 during implementation: Task 3's new factory signature references `FederationStatusService` (Task 4), so implementing Task 3 first cannot compile. Known-bad state avoided: red build with CS0246 on `FederationStatusService`. KEEP: the Task 3/Task 4 content itself (sketches, tests) unchanged.
 
 ## Review Triage Log
 
