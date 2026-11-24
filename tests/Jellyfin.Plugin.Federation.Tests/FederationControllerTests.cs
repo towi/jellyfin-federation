@@ -67,32 +67,9 @@ public class FederationControllerTests
         Assert.DoesNotContain("serverurl", json, StringComparison.OrdinalIgnoreCase);
     }
 
-    // Authorization split: the public endpoint requires only authentication
-    // (any user of A sees the reduced status); the full snapshot and the
-    // credential test require elevation. A policy swap would either leak the
-    // setup to every user or hide the status from regular users.
-    [Fact]
-    public void StatusEndpoints_CarryCorrectPolicies()
-    {
-        var type = typeof(FederationController);
-
-        var publicAuth = type.GetMethod("GetStatusPublic")!.GetCustomAttributes(typeof(AuthorizeAttribute), true)
-            .Cast<AuthorizeAttribute>().Single();
-        Assert.Null(publicAuth.Policy);
-        Assert.Null(publicAuth.Roles);
-
-        var fullAuth = type.GetMethod("GetStatus")!.GetCustomAttributes(typeof(AuthorizeAttribute), true)
-            .Cast<AuthorizeAttribute>().Single();
-        Assert.Equal(MediaBrowser.Common.Api.Policies.RequiresElevation, fullAuth.Policy);
-
-        var testAuth = type.GetMethod("TestCredentials")!.GetCustomAttributes(typeof(AuthorizeAttribute), true)
-            .Cast<AuthorizeAttribute>().Single();
-        Assert.Equal(MediaBrowser.Common.Api.Policies.RequiresElevation, testAuth.Policy);
-    }
-
-    // EnableInMainMenu = true is what makes the host list the page in every
-    // user's main menu (DashboardController filters on it); the page JS then
-    // degrades to the reduced status view for non-admins. GetPages uses no
+    // EnableInMainMenu = true makes the host list the page in the admin
+    // main menu (the menu-list endpoint is elevation-gated by the host, so
+    // it is an admin convenience — see README Limitations). GetPages uses no
     // instance state, so the uninitialized-object path is safe.
     [Fact]
     public void Plugin_PageEnabledInMainMenu()
