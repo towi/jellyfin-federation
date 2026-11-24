@@ -59,9 +59,14 @@ target framework is `net10.0`).
 ```
 mkdir -p {dataDir}/plugins/Jellyfin.Plugin.Federation {dataDir}/plugins/configurations
 cp bin/Release/net10.0/Jellyfin.Plugin.Federation.dll {dataDir}/plugins/Jellyfin.Plugin.Federation/
+cp bin/Release/net10.0/logo.png {dataDir}/plugins/Jellyfin.Plugin.Federation/
+cp packaging/meta.json {dataDir}/plugins/Jellyfin.Plugin.Federation/meta.json
 ```
 
 `{dataDir}` is A's `JELLYFIN_DATA_DIR` (e.g. `/var/lib/jellyfin`).
+`meta.json` carries the plugin's metadata (name, version, `imagePath` for the
+logo); the host reads it at startup and preserves local values such as
+`imagePath` across restarts.
 
 ### 4. Configure A — dashboard (recommended)
 
@@ -137,6 +142,13 @@ changes.
 - Each start of A creates a new device row on B ("Jellyfin Federation");
   older rows must **not** be deleted while their images are in use — see
   invariant 2 in [AGENTS.md](AGENTS.md#architecture-invariants).
+- The dashboard's **plugin detail page** (the list entry under
+  *Plugins*, not the plugin's own settings page) shows developer,
+  repository and update info only for plugins published in a package
+  repository. This plugin is sideloaded, so that page shows no repository
+  metadata and reports an error when it tries to look the plugin up in the
+  official repository. This does not affect the plugin itself; the settings
+  page (status + instances) works normally.
 
 ## Development
 

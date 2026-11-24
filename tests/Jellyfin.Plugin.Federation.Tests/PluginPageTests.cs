@@ -69,4 +69,49 @@ public class PluginPageTests
         Assert.Equal("paul", inst.Username);
         Assert.Equal("secret", inst.Password);
     }
+
+    // The host serves a plugin's image from the plugin directory when
+    // meta.json carries an "imagePath" (PluginsController.GetPluginImage),
+    // and marks the list entry HasImage from it. Both csprojs must therefore
+    // copy the logo into the output so the deploy (DLL + logo.png + meta.json)
+    // is reproducible, and meta.json must reference exactly that file.
+    [Fact]
+    public void Logo_IsCopiedToOutput()
+    {
+        var expected = Path.Combine(AppContext.BaseDirectory, "logo.png");
+        var actual = Path.GetFullPath(expected);
+        Assert.True(File.Exists(actual), $"logo.png not found in test output: {actual}");
+    }
+
+    [Fact]
+    public void Logo_IsValidPng()
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, "logo.png");
+        var bytes = File.ReadAllBytes(path);
+        Assert.Equal(new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A }, bytes.AsSpan(0, 8).ToArray());
+    }
+
+    [Fact]
+    public void PackagingMetaReferencesDeployedLogo()
+    {
+        // packaging/meta.json is the template deployed next to the DLL; its
+        // imagePath is relative to the plugin directory and must name the file
+        // both csprojs copy to the output.
+        var path = Path.Combine(FindRepoRoot(), "packaging", "meta.json");
+        var manifest = JsonSerializer.Deserialize<JsonElement>(File.ReadAllText(path));
+        Assert.Equal("logo.png", manifest.GetProperty("imagePath").GetString());
+        Assert.Equal("30c06888-1907-48cc-957a-6d83e86a39d7", manifest.GetProperty("guid").GetString());
+        Assert.Equal("Jellyfin Federation", manifest.GetProperty("name").GetString());
+    }
+
+    private static string FindRepoRoot()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "Jellyfin.Plugin.Federation.csproj")))
+        {
+            dir = dir.Parent;
+        }
+        Assert.NotNull(dir);
+        return dir!.FullName;
+    }
 }
