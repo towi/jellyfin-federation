@@ -60,14 +60,18 @@ Neue Assembly `Jellyfin.Plugin.Federation` (eigenes Repo/Verzeichnis neben dem S
 | Komponente | Aufgabe |
 |---|---|
 | `Plugin : BasePlugin<PluginConfiguration>` | Manifest, Guid, Config-Zugriff |
-| `Configuration/FederationPluginConfiguration` | Instanzen-Liste; Persistenz via `BasePlugin` → `plugins/configurations/Jellyfin.Plugin.Federation.xml` (XML, hand-editierbar) |
+| `Configuration/FederationPluginConfiguration` | Instanzen-Liste; Persistenz via `BasePlugin` → `plugins/configurations/Jellyfin.Plugin.Federation.xml` (XML; Editierung läuft über die Dashboard-Settings-Seite) |
 | `FederationChannel : IChannel, IRequiresMediaInfoCallback` | eine Instanz pro Remote-Bibliothek; `GetChannelItems` → Remote-API → `ChannelItemInfo[]`; `GetChannelItemMediaInfo` → Remote-PlaybackInfo → `MediaSourceInfo[]` |
 | `RemoteApiClient` | Typed HTTP (NamedClient.Default via IHttpClientFactory), Auth per `POST /Users/AuthenticateByName` → `AccessToken`, der als `ApiKey`-Query-Parameter an jeder Request-URL hängt; JSON via `JsonDefaults.Options` (nutzt `BaseItemDto`/`QueryResult<>`/`PlaybackInfoResponse` aus Jellyfin.Model) |
 | `FederationPluginServiceRegistrator` | DI: `RemoteApiClient`, `IChannel`-Instanzen aus Plugin-Config |
 
 **Channel-Naming:** `{alias} · {bibliotheksname}` (z.B. `paul · Filme`), `DataVersion` = Hash aus Config (erzwingt Re-Hydration bei Config-Änderung).
 
-### Konfiguration (Beispiel)
+### Persistenzformat (Beispiel)
+
+Das obige XML ist die Persistenz, die der Host beim Save der Dashboard-Seite
+schreibt (und beim Start vom Registrator geladen wird). Manuelle Edits werden
+nicht unterstützt — die Einstellungen laufen über die Dashboard-Seite.
 
 ```xml
 <?xml version="1.0" encoding="utf-8"?>

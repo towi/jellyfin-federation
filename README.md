@@ -68,42 +68,19 @@ cp packaging/meta.json {dataDir}/plugins/Jellyfin.Plugin.Federation/meta.json
 logo); the host reads it at startup and preserves local values such as
 `imagePath` across restarts.
 
-### 4. Configure A — dashboard (recommended)
+### 4. Configure A — dashboard
 
-In A's dashboard under **Plugins → Jellyfin Federation** you can manage instances
-(alias, server URL, username, password), test each connection, and save. Saving
-writes the same XML file shown below; **changes apply after a server restart** —
-the page offers a *Restart now* button. The plugin also exposes a non-sensitive
-status API, `GET /Federation/Status/Public` (alias, state, remote name/version,
-channel names — no URLs/usernames), for clients that want to display the status
-of all configured instances.
+In A's dashboard under **Plugins → Jellyfin Federation** you can manage
+instances (alias, server URL, username, password), test each connection, and
+save. Add one row per remote server. **Changes apply after a server restart**
+— the page offers a *Restart now* button.
 
-Create `{dataDir}/plugins/configurations/Jellyfin.Plugin.Federation.xml`
-and lock it down — it holds a password
-(`chmod 600`, owner = the user running Jellyfin):
-
-```xml
-<?xml version="1.0" encoding="utf-8"?>
-<PluginConfiguration xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
-  <Instances>
-    <FederationInstance>
-      <Alias>paul</Alias>
-      <ServerUrl>http://192.168.1.50:8097</ServerUrl>
-      <Username>paul</Username>
-      <Password>secret</Password>
-    </FederationInstance>
-  </Instances>
-</PluginConfiguration>
-```
-
-| Field          | Meaning                                                          |
-|----------------|------------------------------------------------------------------|
-| `Alias`        | Short name; shown in the channel names (`paul · Movies`)          |
-| `ServerUrl`    | B's address as seen from A, with port                            |
-| `Username`     | The B user from step 1                                           |
-| `Password`     | That user's password (stored in plaintext — see `chmod 600`)     |
-
-More `<FederationInstance>` blocks connect more remote servers.
+The configuration is stored by the host in its plugin-configurations
+directory (the host's standard plugin persistence) — instance passwords are
+plaintext there, see the Limitations note. The plugin also exposes a
+non-sensitive status API, `GET /Federation/Status/Public` (alias, state,
+remote name/version, channel names — no URLs/usernames), for clients that want
+to display the status of all configured instances.
 
 ### 5. Restart A and browse
 
@@ -131,6 +108,10 @@ changes.
   again. A **newly added** remote that has never been reachable produces no
   channels until the next restart.
 - Play state stays local; B does not see playback.
+- Instance passwords are stored in plaintext in the host's plugin
+  configurations directory (the host's standard plugin persistence). On a
+  multi-user host, lock that directory down (`chmod 600`, owner = the user
+  running Jellyfin) or run Jellyfin as a least-privilege user.
 - Config changes require a restart of A.
 - The status monitor never logs in to the remote; it only calls the
   unauthenticated `/System/Info/Public`. Credential problems are detected
