@@ -14,8 +14,12 @@ Three features for the federation plugin, all without host changes:
 2. **Down-safety** — a remote that is unreachable must not silently degrade:
    reachability is monitored, channels created earlier keep working and
    self-heal when the remote returns, and invalid credentials are surfaced.
-3. **Status page** — per-remote live state (reachable, remote version, last
-   error, channels, last authenticated contact) in the same dashboard page.
+3. **Status surface** — per-remote live state (reachable, remote version,
+   last error, channels, last authenticated contact) exposed through the
+   plugin's status API (admin `GET Federation/Status`, reduced
+   `GET Federation/Status/Public`), not through a dashboard page (see
+   Deviations: the host gates plugin pages to admins, so a page would not
+   have reached regular users).
 
 Scope decision (user, 2026-11-22): *all three phases in one spec*; restart model
 *save + explicit restart button*; UI placed *only under Dashboard → Plugins*
@@ -100,7 +104,7 @@ No custom endpoint for config read/write, no auth plumbing, no token handling.
 | Piece                                | Design                                                                                                                                                                                                                                                                                                                                                             |
 |--------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `FederationController : ControllerBase` | Plugin MVC controller (auto-registered as application part). Class-level `[Authorize]` (authentication required on every action — never anonymous). `GET Status` and `POST TestCredentials` carry `[Authorize(Policy = Policies.RequiresElevation)]`; the host's *default* policy only requires authentication (verified), which would expose instance URLs to every logged-in user. `GET Status/Public` carries no policy (any authenticated user) and returns reduced fields only. `Policies` comes from `MediaBrowser.Common.Api` (referenced in both build targets). |
-| `GET Federation/Status/Public`         | Per instance, reduced fields only: `alias`, `state`, `remoteServerName` + `remoteVersion`, `channels`. **Never** `serverUrl`, `username`, `lastError`, `lastAuthenticatedUtc`, `lastCheckedUtc` — those exist only on the admin `GET Status`. Lets a custom client (or the status page) render a non-sensitive view for any authenticated user of A. |
+| `GET Federation/Status/Public`         | Per instance, reduced fields only: `alias`, `state`, `remoteServerName` + `remoteVersion`, `channels`. **Never** `serverUrl`, `username`, `lastError`, `lastAuthenticatedUtc`, `lastCheckedUtc` — those exist only on the admin `GET Status`. Lets a custom client render a non-sensitive view for any authenticated user of A. |
 | `GET Federation/Status`              | Per instance: `alias`, `serverUrl`, `username` (**never** password), `state` ∈ `Unknown \| Online \| Offline \| InvalidCredentials`, `lastError` (a fixed sanitized category string — `unreachable` / `timeout` / `remote returned {code}` / `remote error` / `probe failed` — never raw exception text, so no stack, no query strings, no tokens can leak; invariant 9), `lastCheckedUtc`, `remoteVersion` + `remoteServerName` (from public info), `channels` (names of the channels this instance contributed), `lastAuthenticatedUtc` (last successful authenticated request of the persistent client, `null` if B was down at startup and it never logged in). State transitions: `InvalidCredentials` is set only by a failed login (401/403) — via the persistent client's re-login failure or the Test button; it clears back to `Online` on the next successful authenticated request or successful test. |
 | `POST Federation/TestCredentials`    | See phase 1. Also admin-gated. Exactly one login attempt — a wrong password must feed the remote's lockout counter exactly once (invariant 3 extension to the UI path).                                                                                                  |
 | `FederationStatusService`           | `IHostedService`, registered by `FederationPluginServiceRegistrator` (plugin registrations land in the host's service collection — verified). Own `HttpClient` (5 s timeout, **no** `Authorization` header). Per instance: `GET {serverUrl}/System/Info/Public`. Online: 30 s interval. Offline: exponential backoff 30 s → 60 s → 120 s → … capped at 10 min, per-instance offset so instances don't synchronize. |
@@ -129,7 +133,7 @@ the Test-connection button and (b) the persistent client's 401-re-login failure
 | Factory fallback            | If the startup login fails with a **transient** error (connection refused, timeout, 5xx/503 — **not** 401/403, which stay definitive per invariant 3) and a views cache exists for the instance, the factory builds the channels **from the cache**: same `FederationChannelOptions` (alias, channel name, remote library id, trimmed server URL), same `RemoteApiClient` instance, but **without a token**. |
 | Self-healing                | A token-less client keeps credentials in memory. The first authenticated request triggers exactly one **proactive** login before sending — single-flight under the existing `_loginLock`, so concurrent callers share one login (a duplicate login would create an extra device row, invariant 2) — and no request is ever sent with an empty `ApiKey` (no dead 401 round-trip). The channel heals with zero new machinery when B returns. Mid-run token revocation/remote restarts keep using the existing single-shot 401 re-login path (`RefreshTokenAsync`). |
 | DataVersion                 | Unchanged: `SHA256(alias \| remoteLibraryId \| serverUrl)` (invariant 10). Cache-built and live channels produce identical `DataVersion` → no cache churn, no re-hydration storm. |
-| Documented expectations    | B down at A's start **with** cache: channels present in the sidebar; their content is bounded by the host's channel-item file cache (3 h), then empty until B is back. B down at A's start **without** cache (new instance, never seen): no channels — the status page shows `Offline`, plus the hint that a restart creates them once B is reachable. New/renamed libraries on B require an A restart (no runtime channel add — host constraint, see facts). |
+| Documented expectations    | B down at A's start **with** cache: channels present in the sidebar; their content is bounded by the host's channel-item file cache (3 h), then empty until B is back. B down at A's start **without** cache (new instance, never seen): no channels — the status API reports `Offline` for the instance; the channels appear after the next restart once B is reachable. New/renamed libraries on B require an A restart (no runtime channel add — host constraint, see facts). |
 
 ## Error handling
 
@@ -142,13 +146,13 @@ the Test-connection button and (b) the persistent client's 401-re-login failure
   status service records the failure — the reporting callback lives on
   `RemoteApiClient` itself (set once per instance by the factory), so every
   authenticated call path (browse, playback info, views) reports outcomes
-  uniformly and `FederationChannel` stays unchanged. The status page thus
+  uniformly and `FederationChannel` stays unchanged. The status API thus
   reflects real request outcomes, not just probe results.
 - **Credentials changed on B (mid-run):** request 401 → re-login → if that
   login also fails 401/403: single attempt, no retry loop (lockout), status
   becomes `InvalidCredentials`, channel errors surface to the client as today.
-  The admin sees it on the status page, fixes the password via the UI, tests,
-  saves, restarts.
+  The admin sees it in the full status (`GET Federation/Status`), fixes the
+  password via the settings page, tests, saves, restarts.
 - **Status API itself:** never throws on remote failure; unreachable remotes
   are data (`Offline` + `lastError`), not errors.
 
@@ -215,7 +219,7 @@ green. Concretely:
 
 1. **Phase 3 groundwork + token-less client** (plan Tasks 1–3: `RemoteApiClient`
    prepare/reporter, `FederationViewsCache`, factory fallback) — the
-   self-healing client and cache the status page will display.
+   self-healing client and cache the status endpoints will surface.
 2. **Phase 2** (plan Tasks 4–5: status service, status + test-credentials
    endpoints) — makes phase 3 observable.
 3. **Phase 1 UI** (plan Task 7: embedded page + `IHasWebPages`) — reads the

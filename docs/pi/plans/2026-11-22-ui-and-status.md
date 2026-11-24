@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Dashboard config UI + status page + views-cache survival for the federation plugin, per the approved spec `docs/pi/specs/2026-11-22-ui-and-status-design.md`.
+**Goal:** Dashboard config UI + status API + views-cache survival for the federation plugin, per the approved spec `docs/pi/specs/2026-11-22-ui-and-status-design.md`.
 
 **Note:** Task order deviates from the spec's phase order (UI first) on purpose — the reporter/cache/status groundwork (Tasks 1–4) lands first because the UI and endpoints depend on it. See the spec's "Implementation order" and "Deviations" sections.
 

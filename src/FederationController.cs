@@ -11,8 +11,9 @@ using Microsoft.AspNetCore.Mvc;
 namespace Jellyfin.Plugin.Federation;
 
 /// <summary>
-/// Federation status and connection-test endpoints. Most users only ever see
-/// <see cref="GetStatusPublic"/> (the main-menu status page, reduced fields:
+/// Federation status and connection-test endpoints. There is no plugin status
+/// page (the host gates plugin pages to admins); <see cref="GetStatusPublic"/>
+/// is the status surface for any authenticated custom client (reduced fields:
 /// alias, state, remote version, channel names — no URLs, usernames, or
 /// error details). The full snapshot and credential test additionally require
 /// elevation (the host's default policy only requires authentication — the
@@ -65,10 +66,10 @@ public class FederationController : ControllerBase
             .ToList());
 
     /// <summary>
-    /// Gets the reduced status for every authenticated user (the main-menu
-    /// status page). Only non-sensitive fields: alias, state, remote name and
-    /// version, channel names. No server URLs, usernames, or error details —
-    /// those stay in <see cref="GetStatus"/> behind elevation.
+    /// Gets the reduced status for every authenticated user (custom clients
+    /// that display the status). Only non-sensitive fields: alias, state,
+    /// remote name and version, channel names. No server URLs, usernames, or
+    /// error details — those stay in <see cref="GetStatus"/> behind elevation.
     /// </summary>
     /// <returns>One row per configured instance, reduced fields.</returns>
     [Authorize]
