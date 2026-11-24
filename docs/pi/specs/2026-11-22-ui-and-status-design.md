@@ -231,6 +231,17 @@ task's tests fail without the task's change.
   controller tests).
 - **Inline JS:** the page keeps its JavaScript inline in `config.html` (host
   plugins do the same); no separate `config.js` file.
+- **Main-menu entry + reduced public status** (user-requested after
+  approval): `EnableInMainMenu` is `true` (spec said `false`). The host's
+  `web/ConfigurationPages` endpoint and the `configurationpage` SPA route
+  are admin-gated (verified in host source and the deployed SPA bundle), so
+  the main-menu item and the page itself remain **admin-only in the web
+  client**; `EnableInMainMenu` costs nothing and helps discovery there. The
+  controller moved from class-level elevation to per-action elevation and
+  gained `GET Federation/Status/Public` (`[Authorize]`, reduced fields:
+  alias, state, remote name/version, channel names — no URLs/usernames/
+  errors) so regular users or custom clients can display a status without
+  the admin surface.
 
 ## Risks
 

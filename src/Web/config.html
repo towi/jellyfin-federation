@@ -14,7 +14,7 @@
                     <div id="federationStatusTable"></div>
                 </div>
 
-                <div class="verticalSection">
+                <div class="verticalSection" id="federationFormSection">
                     <h2>Instances</h2>
                     <div class="fieldDescription" style="margin-bottom:1em;">
                         Each instance connects to one remote Jellyfin server as the given user.
@@ -154,13 +154,18 @@
                     });
                     line.appendChild(dot);
                     line.appendChild(el('strong', {}, row.Alias));
+                    // Admin rows carry LastError/LastAuthenticatedUtc; the
+                    // reduced public rows (non-admin) do not — degrade silently.
                     var meta = row.State + (row.RemoteServerName ? ' — ' + row.RemoteServerName + ' ' + (row.RemoteVersion || '') : '')
                         + (row.LastError ? ' (last error: ' + row.LastError + ')' : '')
                         + (row.LastAuthenticatedUtc ? ' · last authenticated: ' + row.LastAuthenticatedUtc : '');
                     // Spec phase 3: no channels yet + remote not online → hint that
-                    // a restart creates them once B is reachable.
+                    // a restart creates them once B is reachable. Admins are told
+                    // how; regular users only that the channels will appear.
                     if ((!row.Channels || !row.Channels.length) && row.State !== 'Online' && row.State !== 'InvalidCredentials') {
-                        meta += ' — no channels yet; restart A once B is reachable to create them';
+                        meta += window.__fedIsAdmin
+                            ? ' — no channels yet; restart A once B is reachable to create them'
+                            : ' — no channels yet; they appear once the remote is reachable again';
                     }
                     line.appendChild(el('span', { 'class': 'fieldDescription' }, meta));
                     table.appendChild(line);
@@ -174,26 +179,56 @@
             }
 
             function refreshStatus() {
-                ApiClient.ajax({ url: ApiClient.getUrl('Federation/Status'), type: 'GET' })
+                // Admins get the full endpoint; everyone else the reduced
+                // public one (403/401 on the full endpoint for non-admins).
+                var url = window.__fedIsAdmin ? 'Federation/Status' : 'Federation/Status/Public';
+                ApiClient.ajax({ url: ApiClient.getUrl(url), type: 'GET' })
                     .then(renderStatus, function () {});
+            }
+
+            function applyAdminVisibility() {
+                var admin = !!window.__fedIsAdmin;
+                document.getElementById('federationFormSection').style.display = admin ? '' : 'none';
+                document.getElementById('federationSaveSection').style.display = admin ? '' : 'none';
+                if (!admin) { document.getElementById('restartSection').style.display = 'none'; }
+            }
+
+            function bootPage() {
+                applyAdminVisibility();
+                refreshStatus();
+                window.__fedStatusTimer = window.setInterval(refreshStatus, 5000);
+                if (!window.__fedIsAdmin) {
+                    // Regular users only see the status panel — do not load
+                    // the (elevation-gated) configuration at all.
+                    return;
+                }
+                Dashboard.showLoadingMsg();
+                ApiClient.getPluginConfiguration(FederationPluginConfig.uniquePluginId).then(function (config) {
+                    window.__fedInstances = (config.Instances || []).map(function (i) {
+                        return { Alias: i.Alias, ServerUrl: i.ServerUrl, Username: i.Username, Password: i.Password };
+                    });
+                    renderInstances();
+                    applyAdminVisibility();
+                    Dashboard.hideLoadingMsg();
+                }, function () {
+                    Dashboard.hideLoadingMsg();
+                    document.getElementById('saveError').textContent = 'Failed to load configuration.';
+                });
             }
 
             document.querySelector('.federationConfigPage')
                 .addEventListener('pageshow', function () {
                     // Clear a previous poller (revisits must not stack intervals).
                     if (window.__fedStatusTimer) { window.clearInterval(window.__fedStatusTimer); }
-                    refreshStatus();
-                    window.__fedStatusTimer = window.setInterval(refreshStatus, 5000);
-                    Dashboard.showLoadingMsg();
-                    ApiClient.getPluginConfiguration(FederationPluginConfig.uniquePluginId).then(function (config) {
-                        window.__fedInstances = (config.Instances || []).map(function (i) {
-                            return { Alias: i.Alias, ServerUrl: i.ServerUrl, Username: i.Username, Password: i.Password };
-                        });
-                        renderInstances();
-                        Dashboard.hideLoadingMsg();
+                    // The visibility branching must happen after the current
+                    // user is known (async), not before — so it lives in
+                    // bootPage, called from the callbacks.
+                    window.__fedIsAdmin = false;
+                    ApiClient.getCurrentUser().then(function (user) {
+                        window.__fedIsAdmin = !!(user && user.Policy && user.Policy.IsAdministrator);
+                        bootPage();
                     }, function () {
-                        Dashboard.hideLoadingMsg();
-                        document.getElementById('saveError').textContent = 'Failed to load configuration.';
+                        bootPage();
                     });
                 });
 

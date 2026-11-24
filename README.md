@@ -149,6 +149,14 @@ changes.
   metadata and reports an error when it tries to look the plugin up in the
   official repository. This does not affect the plugin itself; the settings
   page (status + instances) works normally.
+- The settings page (status + instances) and the *Jellyfin Federation*
+  main-menu entry are visible to **administrators only** in the web
+  client: the host serves the configuration-page list
+  (`web/ConfigurationPages`) and the `configurationpage` SPA route with
+  admin rights only (host constraint, not a plugin setting). A reduced,
+  non-sensitive status endpoint for regular users exists at
+  `GET /Federation/Status/Public` (alias, state, remote version, channel
+  names — no URLs/usernames) for clients that want to show it.
 
 ## Development
 

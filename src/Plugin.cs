@@ -61,7 +61,11 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
                 Name = "Jellyfin Federation",
                 DisplayName = "Jellyfin Federation",
                 EmbeddedResourcePath = GetType().Assembly.GetName().Name + ".Web.config.html",
-                EnableInMainMenu = false
+                // Main menu entry: every user of A sees the (reduced) status of
+                // all federated remotes. The page's form and the admin-only
+                // endpoints stay gated server-side (elevation); the page JS
+                // hides the form for non-admins.
+                EnableInMainMenu = true
             }
         };
 }

@@ -11,11 +11,17 @@ using Microsoft.AspNetCore.Mvc;
 namespace Jellyfin.Plugin.Federation;
 
 /// <summary>
-/// Federation status and connection-test endpoints. Admin-only: instance URLs and
-/// usernames are not for regular users (the host's default policy would allow any
-/// authenticated user — elevation is explicit).
+/// Federation status and connection-test endpoints. Most users only ever see
+/// <see cref="GetStatusPublic"/> (the main-menu status page, reduced fields:
+/// alias, state, remote version, channel names — no URLs, usernames, or
+/// error details). The full snapshot and credential test additionally require
+/// elevation (the host's default policy only requires authentication — the
+/// per-action elevation is explicit). The class requires authentication as
+/// the baseline; <see cref="GetStatusPublic"/> carries no further restriction.
+/// Do NOT put [AllowAnonymous] here: it would opt the whole controller out
+/// of authorization and leak the sensitive endpoints to unauthenticated users.
 /// </summary>
-[Authorize(Policy = Policies.RequiresElevation)]
+[Authorize]
 [ApiController]
 [Route("[controller]")] // → /Federation
 public class FederationController : ControllerBase
@@ -35,9 +41,11 @@ public class FederationController : ControllerBase
     }
 
     /// <summary>
-    /// Gets the per-instance status snapshot.
+    /// Gets the per-instance status snapshot. Admin-only (full fields include
+    /// server URLs and usernames).
     /// </summary>
     /// <returns>Status rows; never fails on remote errors (they are data). Never includes the password or an access token.</returns>
+    [Authorize(Policy = Policies.RequiresElevation)]
     [HttpGet("Status")]
     public ActionResult<object> GetStatus()
         => Ok(_status.Snapshot()
@@ -57,6 +65,27 @@ public class FederationController : ControllerBase
             .ToList());
 
     /// <summary>
+    /// Gets the reduced status for every authenticated user (the main-menu
+    /// status page). Only non-sensitive fields: alias, state, remote name and
+    /// version, channel names. No server URLs, usernames, or error details —
+    /// those stay in <see cref="GetStatus"/> behind elevation.
+    /// </summary>
+    /// <returns>One row per configured instance, reduced fields.</returns>
+    [Authorize]
+    [HttpGet("Status/Public")]
+    public ActionResult<object> GetStatusPublic()
+        => Ok(_status.Snapshot()
+            .Select(s => new
+            {
+                s.Alias,
+                s.State,
+                s.RemoteServerName,
+                s.RemoteVersion,
+                s.Channels
+            })
+            .ToList());
+
+    /// <summary>
     /// Tests credentials against one remote: exactly one login and views fetch with
     /// a throwaway client (never the persistent one — invariant 2). The outcome is
     /// also fed to the status service (a failed test sets InvalidCredentials; a
@@ -64,6 +93,7 @@ public class FederationController : ControllerBase
     /// </summary>
     /// <param name="request">Instance data (alias/server/username/password as entered, not necessarily saved).</param>
     /// <returns>ok + libraryCount, or a reason; wrong credentials count exactly one failed login on the remote.</returns>
+    [Authorize(Policy = Policies.RequiresElevation)]
     [HttpPost("TestCredentials")]
     public async Task<ActionResult<object>> TestCredentials([FromBody] TestCredentialsRequest request)
     {

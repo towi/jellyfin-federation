@@ -41,6 +41,70 @@ public class FederationControllerTests
         Assert.DoesNotContain("ApiKey", json, StringComparison.Ordinal);
     }
 
+    // The main-menu status page is for every user of A: the public endpoint
+    // must carry only the reduced, non-sensitive fields — never the server
+    // URL or username (those reveal the setup of the federated link) and no
+    // error text.
+    [Fact]
+    public void GetStatusPublic_ReturnsOnlyReducedFields()
+    {
+        var status = CreateStatus();
+        status.RegisterInstance(new FederationInstance { Alias = "paul", ServerUrl = "https://remote.example.com:8920", Username = "paul", Password = "secret-token" });
+        status.RegisterChannels("paul", new[] { "paul · Movies" });
+        var controller = new FederationController(status, () => throw new InvalidOperationException("not used"));
+
+        var result = controller.GetStatusPublic();
+
+        var json = JsonSerializer.Serialize(((OkObjectResult)result.Result!).Value!, FederationJsonOptions.Options);
+        Assert.Contains("\"alias\":\"paul\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"state\":\"Unknown\"", json, StringComparison.Ordinal); // not yet probed
+        // The middot (U+00B7) is escaped by the default encoder, uppercase.
+        Assert.Contains("\"channels\":[\"paul \\u00B7 Movies\"]", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("remote.example.com", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("username", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("secret-token", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("lasterror", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("serverurl", json, StringComparison.OrdinalIgnoreCase);
+    }
+
+    // Authorization split: the public endpoint requires only authentication
+    // (any user of A sees the reduced status); the full snapshot and the
+    // credential test require elevation. A policy swap would either leak the
+    // setup to every user or hide the status from regular users.
+    [Fact]
+    public void StatusEndpoints_CarryCorrectPolicies()
+    {
+        var type = typeof(FederationController);
+
+        var publicAuth = type.GetMethod("GetStatusPublic")!.GetCustomAttributes(typeof(AuthorizeAttribute), true)
+            .Cast<AuthorizeAttribute>().Single();
+        Assert.Null(publicAuth.Policy);
+        Assert.Null(publicAuth.Roles);
+
+        var fullAuth = type.GetMethod("GetStatus")!.GetCustomAttributes(typeof(AuthorizeAttribute), true)
+            .Cast<AuthorizeAttribute>().Single();
+        Assert.Equal(MediaBrowser.Common.Api.Policies.RequiresElevation, fullAuth.Policy);
+
+        var testAuth = type.GetMethod("TestCredentials")!.GetCustomAttributes(typeof(AuthorizeAttribute), true)
+            .Cast<AuthorizeAttribute>().Single();
+        Assert.Equal(MediaBrowser.Common.Api.Policies.RequiresElevation, testAuth.Policy);
+    }
+
+    // EnableInMainMenu = true is what makes the host list the page in every
+    // user's main menu (DashboardController filters on it); the page JS then
+    // degrades to the reduced status view for non-admins. GetPages uses no
+    // instance state, so the uninitialized-object path is safe.
+    [Fact]
+    public void Plugin_PageEnabledInMainMenu()
+    {
+        var plugin = (Plugin)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(Plugin));
+
+        var page = Assert.Single(plugin.GetPages());
+        Assert.True(page.EnableInMainMenu);
+        Assert.Equal("Jellyfin Federation", page.Name);
+        Assert.Equal("Jellyfin.Plugin.Federation.Web.config.html", page.EmbeddedResourcePath);
+    }
+
     [Fact]
     public async Task TestCredentials_Success_ReturnsLibraryCount()
     {
@@ -114,10 +178,36 @@ public class FederationControllerTests
     [Fact]
     public void Endpoints_AreAdminOnly()
     {
-        // The host's default policy only requires authentication; our endpoints
-        // must pin RequiresElevation explicitly (verified host behavior).
-        var authorize = typeof(FederationController).GetCustomAttribute<AuthorizeAttribute>();
-        Assert.NotNull(authorize);
-        Assert.Equal("RequiresElevation", authorize!.Policy);
+        // The host's default policy only requires authentication; the
+        // full-status and test-credentials endpoints must pin
+        // RequiresElevation per action (verified host behavior). The
+        // public status endpoint deliberately uses plain [Authorize] so
+        // every authenticated user sees the reduced status. The class
+        // itself requires authentication — it must never be
+        // [AllowAnonymous] (that opts the whole controller out of
+        // authorization and would leak the sensitive endpoints).
+        var type = typeof(FederationController);
+
+        // No [AllowAnonymous] anywhere on the controller: it would opt the
+        // whole controller out of authorization and leak the sensitive
+        // endpoints to unauthenticated users (caught in a live check).
+        Assert.Empty(type.GetCustomAttributes().Where(a => a.GetType().Name == "AnonymousAuthorizeAttribute"));
+
+        var classAuth = type.GetCustomAttribute<AuthorizeAttribute>();
+        Assert.NotNull(classAuth);
+        Assert.Null(classAuth!.Policy);
+
+        var fullStatus = type.GetMethod("GetStatus")!.GetCustomAttribute<AuthorizeAttribute>();
+        Assert.NotNull(fullStatus);
+        Assert.Equal("RequiresElevation", fullStatus!.Policy);
+
+        var test = type.GetMethod("TestCredentials")!.GetCustomAttribute<AuthorizeAttribute>();
+        Assert.NotNull(test);
+        Assert.Equal("RequiresElevation", test!.Policy);
+
+        var pub = type.GetMethod("GetStatusPublic")!.GetCustomAttribute<AuthorizeAttribute>();
+        Assert.NotNull(pub);
+        Assert.Null(pub!.Policy);
+        Assert.Null(pub.Roles);
     }
 }
