@@ -54,9 +54,8 @@ Scope decision (user, 2026-11-22): *all three phases in one spec*; restart model
 
 ```mermaid
 flowchart TB
-  subgraph UI["Dashboard (admin, embedded pages)"]
+  subgraph UI["Dashboard (admin, embedded page)"]
     C["config.html (settings form, inline JS)<br/>instances: add/remove/test/save"]
-    SP["status.html (main menu entry, inline JS)<br/>polls Federation/Status/Public every 5 s"]
   end
   subgraph API["FederationController (plugin MVC)"]
     T["POST Federation/TestCredentials (admin)"]
@@ -70,9 +69,10 @@ flowchart TB
     CA["FederationChannel + RemoteApiClient<br/>(existing; 401 self-heal)"]
   end
   B["Remote B"]
+  CLIENT["custom client (any authenticated user)"]
 
   C -- "ApiClient (authenticated, same-origin)" --> T
-  SP -- "poll every 5 s" --> P
+  CLIENT -- "poll" --> P
   S --> R
   P --> R
   T -. "throwaway client, exactly 1 login, disposed" .-> B
@@ -89,9 +89,8 @@ No custom endpoint for config read/write, no auth plumbing, no token handling.
 
 | Piece                          | Design                                                                                                                                                |
 |--------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `Plugin : IHasWebPages`        | `GetPages()` returns two `PluginPageInfo`s: **settings** — `Name = "Jellyfin Federation"`, `EmbeddedResourcePath = "Jellyfin.Plugin.Federation.Web.config.html"`, `EnableInMainMenu = false` (Dashboard → Plugins only); **status** — `Name = "Jellyfin Federation Status"`, `EmbeddedResourcePath = "Jellyfin.Plugin.Federation.Web.status.html"`, `EnableInMainMenu = true` (main menu entry). The host's menu-list endpoint (`web/ConfigurationPages`) is elevation-gated, so both surfaces are admin-only in the web client (host constraint, see README Limitations); the status page deliberately polls the reduced public endpoint, which any authenticated user can call from a custom client. |
-| `src/Web/config.html`          | Self-contained settings page (inline JS, no separate `config.js` — the host's own plugins keep JS inline in the html). `data-role="page"`, `data-require="emby-input,emby-button"`, `pageshow` handler. Loads via `ApiClient.getPluginConfiguration(pluginId)`, saves via `ApiClient.updatePluginConfiguration(pluginId, config)`. Instances form only — no status panel (that moved to the status page). Vanilla JS, no framework, no external CDN (must work in offline/Tailscale setups). |
-| `src/Web/status.html`          | Self-contained status page (inline JS), the main-menu entry. `data-role="page"`, `pageshow` handler polls `Federation/Status/Public` every 5 s. Renders per remote: colored state dot, alias, state, remote name/version, channel list; a failed fetch renders a visible "status unavailable" line instead of an empty table. Vanilla JS, no framework, no external CDN. |
+| `Plugin : IHasWebPages`        | `GetPages()` returns one `PluginPageInfo`: `Name = "Jellyfin Federation"`, `DisplayName = "Jellyfin Federation"`, `EmbeddedResourcePath = "Jellyfin.Plugin.Federation.Web.config.html"`, `EnableInMainMenu = false` (appears under Dashboard → Plugins only). There is no plugin status page — the host's menu-list endpoint (`web/ConfigurationPages`) is elevation-gated (host constraint, see README Limitations), and the status surface is the `GET Federation/Status/Public` endpoint for custom clients instead. |
+| `src/Web/config.html`          | Self-contained settings page (inline JS, no separate `config.js` — the host's own plugins keep JS inline in the html). `data-role="page"`, `data-require="emby-input,emby-button"`, `pageshow` handler. Loads via `ApiClient.getPluginConfiguration(pluginId)`, saves via `ApiClient.updatePluginConfiguration(pluginId, config)`. Instances form only — no status panel (a status page was tried and dropped in favor of the reduced public endpoint; see "Deviations"). Vanilla JS, no framework, no external CDN (must work in offline/Tailscale setups). |
 | Settings tab                   | One form block per instance: `Alias`, `ServerUrl`, `Username`, `Password` (masked input; value round-trips through the host config API like all host plugin pages — admin-only surface). Buttons: add instance, remove instance, per-instance **Test connection**, **Save**. Client-side validation: http/https URL parses, alias/username non-empty, duplicate alias → warning. The saved XML stays byte-compatible with the hand-edited format; the file remains the single source of truth (`BasePlugin.SaveConfiguration`). |
 | Test connection                | `POST Federation/TestCredentials` (our own controller, introduced with this phase). Uses a **throwaway** `RemoteApiClient` (fresh `HttpClient`, fresh DeviceId suffix), performs exactly **one** login plus views fetch, then disposes. Never touches the persistent per-instance client — a login on the persistent client would roll a new DeviceId and orphan tokens baked into persisted image URLs (invariant 2). Result JSON: `{ ok: true, libraryCount: n }` or `{ ok: false, reason: "Unreachable" \| "InvalidCredentials" \| "ServerError" }` (auth failure = 401/403 from the login attempt; unreachable = connection/timeout; server error = any other non-success login status). |
 | Save → restart                 | After `updatePluginConfiguration` succeeds, the page shows "Saved — restart required to apply" and a **Restart now** button that calls `POST System/Restart` through the authenticated dashboard client. No auto-restart, no `NotifyPendingRestart` (user decision). |
@@ -105,7 +104,7 @@ No custom endpoint for config read/write, no auth plumbing, no token handling.
 | `GET Federation/Status`              | Per instance: `alias`, `serverUrl`, `username` (**never** password), `state` ∈ `Unknown \| Online \| Offline \| InvalidCredentials`, `lastError` (a fixed sanitized category string — `unreachable` / `timeout` / `remote returned {code}` / `remote error` / `probe failed` — never raw exception text, so no stack, no query strings, no tokens can leak; invariant 9), `lastCheckedUtc`, `remoteVersion` + `remoteServerName` (from public info), `channels` (names of the channels this instance contributed), `lastAuthenticatedUtc` (last successful authenticated request of the persistent client, `null` if B was down at startup and it never logged in). State transitions: `InvalidCredentials` is set only by a failed login (401/403) — via the persistent client's re-login failure or the Test button; it clears back to `Online` on the next successful authenticated request or successful test. |
 | `POST Federation/TestCredentials`    | See phase 1. Also admin-gated. Exactly one login attempt — a wrong password must feed the remote's lockout counter exactly once (invariant 3 extension to the UI path).                                                                                                  |
 | `FederationStatusService`           | `IHostedService`, registered by `FederationPluginServiceRegistrator` (plugin registrations land in the host's service collection — verified). Own `HttpClient` (5 s timeout, **no** `Authorization` header). Per instance: `GET {serverUrl}/System/Info/Public`. Online: 30 s interval. Offline: exponential backoff 30 s → 60 s → 120 s → … capped at 10 min, per-instance offset so instances don't synchronize. |
-| Status page                  | `status.html` (main menu entry, see phase 1). Polls `Federation/Status/Public` every 5 s while visible. Renders per remote: colored state dot, alias, state, remote name/version, channel list; a failed fetch renders a visible "status unavailable" line instead of an empty table. (Originally the spec put a status panel inside the settings page; it was split out to its own page because the settings page is the admin-only configuration surface, and the status belongs to the main menu entry. Deviation recorded below.)                                       |
+| Status consumer                | No plugin status page (tried, dropped — the host gates plugin pages to admins in the web client). Instead `GET Federation/Status/Public` is the status surface for any authenticated user / custom client; a client that wants a live view polls it on an interval. (Originally the spec put a status panel inside the settings page; the panel was removed because the settings page is the admin-only configuration surface. Deviation recorded below.)                                       |
 
 ### New invariant 11 — the monitor never authenticates
 
@@ -187,7 +186,6 @@ the Test-connection button and (b) the persistent client's 401-re-login failure
 **New** (all under `src/`, namespace `Jellyfin.Plugin.Federation`):
 
 - `Web/config.html` — embedded settings page (self-contained, inline JS; no separate `config.js`)
-- `Web/status.html` — embedded status page (self-contained, inline JS), the main-menu entry
 - `FederationController.cs` — `Status` (admin), `Status/Public` (any authenticated user, reduced fields: alias/state/remote name+version/channel names — no URLs/usernames/errors), `TestCredentials` (admin) — anonymous response types; no `StatusModels.cs` (single consumer)
 - `FederationStatusService.cs` — `IHostedService` reachability loop + in-memory state
 - `FederationViewsCache.cs` — views cache load/save
@@ -199,7 +197,7 @@ the Test-connection button and (b) the persistent client's 401-re-login failure
 - `RemoteApiClient.cs` — credential-without-token mode (factory fallback), `lastAuthenticatedUtc` tracking, and a reporting callback into the status service for request outcomes (success → `lastAuthenticatedUtc`, failure → `lastError`, 401/403 on re-login → `InvalidCredentials`)
 - `FederationChannelFactory.cs` — cache fallback + cache write + status hooks
 - `FederationPluginServiceRegistrator.cs` — register status service (hosted), controller dependencies, status singleton
-- `Jellyfin.Plugin.Federation.csproj` — `<EmbeddedResource Include="Web/config.html" />` + `Web/status.html` (pinned `LogicalName` in both targets)
+- `Jellyfin.Plugin.Federation.csproj` — `<EmbeddedResource Include="Web/config.html" />` (pinned `LogicalName` in both targets)
 - `container/Jellyfin.Plugin.Federation.Container.csproj` — same `EmbeddedResource`; **`<FrameworkReference Include="Microsoft.AspNetCore.App" />`** (probe-verified: required for `ControllerBase`; the source-checkout target inherits it transitively through the `MediaBrowser.Common` project reference, the HintPath-DLL container target does not). One reference covers everything: `IHostedService` (`Microsoft.Extensions.Hosting.Abstractions`) and `AddHostedService` (`Microsoft.Extensions.DependencyInjection`) ship in the same shared framework (verified against the SDK ref pack) — no additional extracted container-refs DLLs needed.
 
 **Docs**:
@@ -228,33 +226,29 @@ task's tests fail without the task's change.
 
 ## Deviations from this approved spec
 
-- **Two pages, not one:** the spec originally put a status panel on top of the
-  single settings page (`config.html`). Implemented as two separate embedded
-  pages instead: **settings** (`config.html`, `EnableInMainMenu = false`,
-  Dashboard → Plugins only) and **status** (`status.html`,
-  `EnableInMainMenu = true`, main menu entry). The status page polls
-  `Federation/Status/Public` (the reduced endpoint) rather than the admin-only
-  `Federation/Status`, so it stays reachable from a custom client. The settings
-  page's per-instance Test button is the only credential-testing surface.
-  `GetPages()` returns both `PluginPageInfo`s.
+- **No status page:** the spec originally put a status panel on top of the
+  settings page. Implemented without any plugin status surface: the settings
+  page (`config.html`, `EnableInMainMenu = false`, Dashboard → Plugins only)
+  carries only the instances form; the status data is exposed through
+  `GET Federation/Status/Public` (the reduced endpoint) for custom clients.
+  A dedicated status page / main-menu entry was built and then dropped —
+  the host gates plugin pages to admins in the web client (verified: the
+  `web/ConfigurationPages` menu list and the SPA route are elevation-gated),
+  so a status page would be admin-only while its purpose is user visibility.
 - **Anonymous response types:** the controller returns anonymous types instead
   of a `StatusModels.cs` (single consumer; the response shape is pinned by the
   controller tests).
-- **Inline JS:** both pages keep their JavaScript inline in `config.html` /
-  `status.html` (host plugins do the same); no separate JS files.
-- **Main-menu entry + reduced public status** (user-requested after
-  approval): the status page gets its own `PluginPageInfo` with
-  `EnableInMainMenu = true`; the settings page keeps
-  `EnableInMainMenu = false` (spec had one page, no main menu). The host's
-  `web/ConfigurationPages` endpoint and the `configurationpage` SPA route
-  are admin-gated (verified in host source and the deployed SPA bundle), so
-  both pages remain **admin-only in the web client**; `EnableInMainMenu`
-  costs nothing and helps admin discovery. The controller moved from
-  class-level elevation to per-action elevation and gained
-  `GET Federation/Status/Public` (`[Authorize]`, reduced fields: alias,
-  state, remote name/version, channel names — no URLs/usernames/errors) so
-  regular users or custom clients can display a status without the admin
-  surface.
+- **Inline JS:** the page keeps its JavaScript inline in `config.html` (host
+  plugins do the same); no separate JS files.
+- **Reduced public status endpoint instead of a page** (user-requested after
+  approval): the controller moved from class-level elevation to per-action
+  elevation and gained `GET Federation/Status/Public` (`[Authorize]`, reduced
+  fields: alias, state, remote name/version, channel names — no URLs/usernames/
+  errors) so regular users or custom clients can display a status without the
+  admin surface. A main-menu status page was considered and dropped: the
+  host's `web/ConfigurationPages` endpoint and the `configurationpage` SPA
+  route are admin-gated (verified in host source and the deployed SPA bundle),
+  so a plugin status page would be admin-only in the web client.
 
 ## Risks
 

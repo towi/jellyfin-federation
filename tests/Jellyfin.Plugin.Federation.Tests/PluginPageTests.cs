@@ -22,7 +22,6 @@ public class PluginPageTests
         var names = assembly.GetManifestResourceNames();
 
         Assert.Contains("Jellyfin.Plugin.Federation.Web.config.html", names);
-        Assert.Contains("Jellyfin.Plugin.Federation.Web.status.html", names);
     }
 
     [Fact]

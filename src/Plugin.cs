@@ -56,25 +56,15 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
     public IEnumerable<PluginPageInfo> GetPages()
         => new[]
         {
-            // Settings: Dashboard → Plugins only. No main menu entry (the
-            // status page is the main menu entry instead).
+            // Settings only: Dashboard → Plugins. No main menu entry — the
+            // status surface is served by the /Federation/Status/Public
+            // endpoint for custom clients, not by a plugin page.
             new PluginPageInfo
             {
                 Name = "Jellyfin Federation",
                 DisplayName = "Jellyfin Federation",
                 EmbeddedResourcePath = GetType().Assembly.GetName().Name + ".Web.config.html",
                 EnableInMainMenu = false
-            },
-            // Status: own main menu entry (the host's menu-list endpoint is
-            // elevation-gated, so admin-only in the web client — see README
-            // Limitations). The page polls the reduced public endpoint, which
-            // any authenticated user can call from a custom client.
-            new PluginPageInfo
-            {
-                Name = "Jellyfin Federation Status",
-                DisplayName = "Jellyfin Federation Status",
-                EmbeddedResourcePath = GetType().Assembly.GetName().Name + ".Web.status.html",
-                EnableInMainMenu = true
             }
         };
 }
