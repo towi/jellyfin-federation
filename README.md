@@ -73,9 +73,11 @@ logo); the host reads it at startup and preserves local values such as
 In A's dashboard under **Plugins → Jellyfin Federation** you can manage instances
 (alias, server URL, username, password), test each connection, and save. Saving
 writes the same XML file shown below; **changes apply after a server restart** —
-the page offers a *Restart now* button. The same page shows a live status table
-(reachability, remote version, last error, last authenticated contact) for every
-configured instance.
+the page offers a *Restart now* button.
+
+The plugin also registers a main-menu entry, **Jellyfin Federation Status**,
+which shows a live status table (reachability, remote name/version, channel
+list) for every configured instance, updated every 5 seconds.
 
 Create `{dataDir}/plugins/configurations/Jellyfin.Plugin.Federation.xml`
 and lock it down — it holds a password
@@ -148,15 +150,14 @@ changes.
   repository. This plugin is sideloaded, so that page shows no repository
   metadata and reports an error when it tries to look the plugin up in the
   official repository. This does not affect the plugin itself; the settings
-  page (status + instances) works normally.
-- The settings page (status + instances) and the *Jellyfin Federation*
-  main-menu entry are visible to **administrators only** in the web
-  client: the host serves the configuration-page list
-  (`web/ConfigurationPages`) and the `configurationpage` SPA route with
-  admin rights only (host constraint, not a plugin setting). A reduced,
-  non-sensitive status endpoint for regular users exists at
-  `GET /Federation/Status/Public` (alias, state, remote version, channel
-  names — no URLs/usernames) for clients that want to show it.
+  and status pages work normally.
+- Both the settings page and the *Jellyfin Federation Status* main-menu entry
+  are visible to **administrators only** in the web client: the host serves
+  the configuration-page list (`web/ConfigurationPages`) and the
+  `configurationpage` SPA route with admin rights only (host constraint, not a
+  plugin setting). A reduced, non-sensitive status endpoint for regular users
+  exists at `GET /Federation/Status/Public` (alias, state, remote version,
+  channel names — no URLs/usernames) for clients that want to show it.
 
 ## Development
 

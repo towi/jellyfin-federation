@@ -67,19 +67,26 @@ public class FederationControllerTests
         Assert.DoesNotContain("serverurl", json, StringComparison.OrdinalIgnoreCase);
     }
 
-    // EnableInMainMenu = true makes the host list the page in the admin
-    // main menu (the menu-list endpoint is elevation-gated by the host, so
-    // it is an admin convenience — see README Limitations). GetPages uses no
-    // instance state, so the uninitialized-object path is safe.
+    // The pages are split: settings live under Dashboard → Plugins only
+    // (EnableInMainMenu = false), status is its own main menu entry. The
+    // menu-list endpoint is elevation-gated by the host (admin-only in the
+    // web client — see README Limitations); /Federation/Status/Public keeps
+    // the status data reachable for any authenticated custom client.
+    // GetPages uses no instance state, so the uninitialized-object path is safe.
     [Fact]
-    public void Plugin_PageEnabledInMainMenu()
+    public void Plugin_PagesSplitSettingsAndStatus()
     {
         var plugin = (Plugin)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(Plugin));
 
-        var page = Assert.Single(plugin.GetPages());
-        Assert.True(page.EnableInMainMenu);
-        Assert.Equal("Jellyfin Federation", page.Name);
-        Assert.Equal("Jellyfin.Plugin.Federation.Web.config.html", page.EmbeddedResourcePath);
+        var pages = plugin.GetPages().ToList();
+        var settings = Assert.Single(pages, p => p.Name == "Jellyfin Federation");
+        var status = Assert.Single(pages, p => p.Name == "Jellyfin Federation Status");
+
+        Assert.False(settings.EnableInMainMenu);
+        Assert.Equal("Jellyfin.Plugin.Federation.Web.config.html", settings.EmbeddedResourcePath);
+
+        Assert.True(status.EnableInMainMenu);
+        Assert.Equal("Jellyfin.Plugin.Federation.Web.status.html", status.EmbeddedResourcePath);
     }
 
     [Fact]

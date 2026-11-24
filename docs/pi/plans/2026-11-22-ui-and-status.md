@@ -1657,15 +1657,26 @@ await d.commit("feat: wire status service, views cache and outcome reporters int
 
 ---
 
-### Task 7: Embedded dashboard page (status panel + settings form)
+### Task 7: Embedded dashboard pages (settings + status)
+
+> **Deviation (implemented):** the final build ships **two** embedded pages, not
+> one. `config.html` is the settings page only (instances form, no status
+> panel) with `EnableInMainMenu = false`; a new `status.html` is the main-menu
+> entry (`EnableInMainMenu = true`) that polls `Federation/Status/Public`.
+> `config.html` also dropped the admin-detection branching (`getCurrentUser`):
+> it is the admin-only settings surface and always renders the form. See the
+> spec's "Deviations" (Two pages, not one) and the spec's phase 1/2 tables,
+> which are the authoritative design. The verbatim `config.html` below is the
+> originally-planned single-page content; treat the settings-only + status.html
+> split as the shipped reality.
 
 **Files:**
-- Create: `src/Web/config.html` (single self-contained file: HTML + inline JS; the host pattern embeds one HTML resource — TMDb/MusicBrainz keep JS inline in the html; keep one file, no separate config.js, matching the host examples and minimizing csproj churn)
-- Modify: `src/Plugin.cs` (implement `IHasWebPages`)
-- Modify: `Jellyfin.Plugin.Federation.csproj` + `container/...csproj` (embedded resource)
+- Create: `src/Web/config.html` (settings page, inline JS) + `src/Web/status.html` (status page, inline JS)
+- Modify: `src/Plugin.cs` (implement `IHasWebPages`, return two `PluginPageInfo`s)
+- Modify: `Jellyfin.Plugin.Federation.csproj` + `container/...csproj` (embedded resource, both pages)
 - Test: `tests/Jellyfin.Plugin.Federation.Tests/PluginPageTests.cs`
 
-**Design:** Host page pattern (verified from `MusicBrainz/Configuration/config.html`): `data-role="page"` root, `data-require="emby-input,emby-button"`, `pageshow` → `ApiClient.getPluginConfiguration(pluginId)`, form submit → `ApiClient.updatePluginConfiguration(pluginId, config).then(Dashboard.processPluginConfigurationUpdateResult)`. The status panel polls `GET Federation/Status` via `ApiClient.getUrl`-based fetch — the ApiClient AJAX helper: `ApiClient.ajax({ url: ApiClient.getUrl('Federation/Status'), type: 'GET' })` (apiclient.d.ts: `ajax(request: any): Promise<any>`, `getUrl(name, params)`). Restart: `ApiClient.ajax({ url: ApiClient.getUrl('System/Restart'), type: 'POST' })`.
+**Design:** Host page pattern (verified from `MusicBrainz/Configuration/config.html`): `data-role="page"` root, `data-require="emby-input,emby-button"` (settings page only), `pageshow` → `ApiClient.getPluginConfiguration(pluginId)`, form submit → `ApiClient.updatePluginConfiguration(pluginId, config).then(Dashboard.processPluginConfigurationUpdateResult)`. The **settings** page (`config.html`) has no status panel and no admin-branching. The **status** page (`status.html`) polls `Federation/Status/Public` (reduced, any authenticated user) every 5 s via the ApiClient AJAX helper `ApiClient.ajax({ url: ApiClient.getUrl('Federation/Status/Public'), type: 'GET' })`. Restart (settings page): `ApiClient.ajax({ url: ApiClient.getUrl('System/Restart'), type: 'POST' })`.
 
 `config.html` complete content:
 
@@ -1930,12 +1941,21 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
     public IEnumerable<PluginPageInfo> GetPages()
         => new[]
         {
+            // Settings: Dashboard → Plugins only.
             new PluginPageInfo
             {
                 Name = "Jellyfin Federation",
                 DisplayName = "Jellyfin Federation",
                 EmbeddedResourcePath = GetType().Assembly.GetName().Name + ".Web.config.html",
                 EnableInMainMenu = false
+            },
+            // Status: main menu entry; polls Federation/Status/Public.
+            new PluginPageInfo
+            {
+                Name = "Jellyfin Federation Status",
+                DisplayName = "Jellyfin Federation Status",
+                EmbeddedResourcePath = GetType().Assembly.GetName().Name + ".Web.status.html",
+                EnableInMainMenu = true
             }
         };
 }
@@ -1948,13 +1968,15 @@ csproj additions (both targets; main csproj — the SDK glob does **not** auto-e
 ```xml
   <ItemGroup>
     <EmbeddedResource Include="src/Web/config.html" />
+    <EmbeddedResource Include="src/Web/status.html" />
   </ItemGroup>
 ```
 
-For the container csproj the path is relative to its own directory (`container/`): `<EmbeddedResource Include="../src/Web/config.html" />`. The manifest resource name derives from the **RootNamespace + logical path**: both csprojs set `RootNamespace` to `Jellyfin.Plugin.Federation` — for a file *outside* the project cone (container), MSBuild computes the resource name from `RootNamespace` + the relative path from the project directory including `..` — this yields `Jellyfin.Plugin.Federation..src.Web.config.html` (dots for `..`)! **Mitigation: set `LogicalName` explicitly** on both so the manifest name is identical and stable:
+For the container csproj the paths are relative to its own directory (`container/`): `<EmbeddedResource Include="../src/Web/config.html" LogicalName="Jellyfin.Plugin.Federation.Web.config.html" />` and the same for `status.html`. The manifest resource name derives from the **RootNamespace + logical path**: both csprojs set `RootNamespace` to `Jellyfin.Plugin.Federation` — for a file *outside* the project cone (container), MSBuild computes the resource name from `RootNamespace` + the relative path from the project directory including `..` — this yields `Jellyfin.Plugin.Federation..src.Web.config.html` (dots for `..`)! **Mitigation: set `LogicalName` explicitly** on both so the manifest name is identical and stable:
 
 ```xml
 <EmbeddedResource Include="src/Web/config.html" LogicalName="Jellyfin.Plugin.Federation.Web.config.html" />
+<EmbeddedResource Include="src/Web/status.html" LogicalName="Jellyfin.Plugin.Federation.Web.status.html" />
 ```
 
 - [ ] **Step 1: Write failing tests** — `PluginPageTests.cs` (add the config round-trip test, see note below):
@@ -1985,6 +2007,7 @@ public class PluginPageTests
         var names = assembly.GetManifestResourceNames();
 
         Assert.Contains("Jellyfin.Plugin.Federation.Web.config.html", names);
+        Assert.Contains("Jellyfin.Plugin.Federation.Web.status.html", names);
     }
 
     [Fact]

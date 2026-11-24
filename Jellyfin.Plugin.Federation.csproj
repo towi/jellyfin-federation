@@ -41,6 +41,7 @@
          both csprojs — the container project's path ("../src/...") would
          otherwise derive a different one. -->
     <EmbeddedResource Include="src/Web/config.html" LogicalName="Jellyfin.Plugin.Federation.Web.config.html" />
+    <EmbeddedResource Include="src/Web/status.html" LogicalName="Jellyfin.Plugin.Federation.Web.status.html" />
   </ItemGroup>
   <ItemGroup>
     <!-- Plugin logo (served by the host via meta.json "imagePath"). Deployed
