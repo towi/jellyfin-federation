@@ -70,8 +70,9 @@ Neue Assembly `Jellyfin.Plugin.Federation` (eigenes Repo/Verzeichnis neben dem S
 ### Persistenzformat (Beispiel)
 
 Das obige XML ist die Persistenz, die der Host beim Save der Dashboard-Seite
-schreibt (und beim Start vom Registrator geladen wird). Manuelle Edits werden
-nicht unterstützt — die Einstellungen laufen über die Dashboard-Seite.
+schreibt (und beim Start vom Registrator geladen wird). Der intendierte Weg
+zur Konfiguration ist die Dashboard-Seite; ein manuelles Edit der Datei wird
+beim nächsten Start zwar gelesen, ist aber nicht der empfohlene Weg.
 
 ```xml
 <?xml version="1.0" encoding="utf-8"?>

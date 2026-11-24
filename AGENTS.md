@@ -280,10 +280,12 @@ dotnet test -c Release        # 77 tests, all offline
   source-checkout DLL for source builds. Same plugin directory name in
   both: `{dataDir}/plugins/Jellyfin.Plugin.Federation/`.
 - The config file is `{dataDir}/plugins/configurations/Jellyfin.Plugin.Federation.xml`
-  (plain file, loaded with `XmlSerializer`; the plugin does not use the
-  host's `BasePlugin` configuration persistence — `Plugin.Instance` is
-  never touched on the registration path). It holds a password:
-  `chmod 600`.
+  — the host's standard plugin persistence: the dashboard's *Save* writes it
+  via `BasePlugin.SaveConfiguration`. The registration path can't use
+  `BasePlugin` (its config access needs `Plugin.Instance`, which does not exist
+  yet during `RegisterServices`), so
+  `FederationPluginServiceRegistrator.LoadConfig` reads the XML directly.
+  It holds a password: `chmod 600`.
 - After a deploy that changes persisted-state formats (stream/image URLs,
   channel names), old rows in the local DB (`BaseItemImageInfos`,
   `MediaSources`) still carry the old values until items are re-hydrated
