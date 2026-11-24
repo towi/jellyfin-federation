@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Jellyfin Federation</title>
+</head>
+<body>
+    <div id="federationConfigPage" data-role="page" class="page type-interior pluginConfigurationPage federationConfigPage" data-require="emby-input,emby-button">
+        <div data-role="content">
+            <div class="content-primary">
+                <h1>Jellyfin Federation</h1>
+
+                <div class="verticalSection">
+                    <h2>Instances</h2>
+                    <div class="fieldDescription" style="margin-bottom:1em;">
+                        Each instance connects to one remote Jellyfin server as the given user.
+                        The alias is also used as the prefix of the libraries' display names
+                        (e.g. alias <code>paul</code> creates the channels <code>paul &middot; Movies</code>,
+                        <code>paul &middot; Shows</code>, &hellip;).
+                        Changes take effect after a server restart.
+                    </div>
+                    <div id="federationInstances"></div>
+                    <button is="emby-button" type="button" id="addInstanceBtn" class="raised block"><span>Add instance</span></button>
+                </div>
+
+                <div class="verticalSection">
+                    <div id="saveError" class="fieldDescription" style="color:#f44336;"></div>
+                    <form class="configForm">
+                        <div>
+                            <button is="emby-button" type="submit" class="raised button-submit block"><span>Save</span></button>
+                        </div>
+                    </form>
+                </div>
+                <div id="restartSection" style="display:none; margin-top:1em;">
+                    <div class="fieldDescription" style="margin-bottom:.5em;">Saved — restart the server to apply the changes.</div>
+                    <button is="emby-button" type="button" id="restartNowBtn" class="raised block"><span>Restart now</span></button>
+                </div>
+            </div>
+        </div>
+        <script type="text/javascript">
+            var FederationPluginConfig = { uniquePluginId: '30c06888-1907-48cc-957a-6d83e86a39d7' };
+
+            function el(tag, attrs, text) {
+                var e = document.createElement(tag);
+                Object.keys(attrs || {}).forEach(function (k) { e.setAttribute(k, attrs[k]); });
+                if (text) { e.textContent = text; }
+                return e;
+            }
+
+            function instanceRow(instance) {
+                var container = el('div', { 'class': 'instanceContainer', 'style': 'border:1px solid rgba(128,128,128,.3); border-radius:.3em; padding:1em; margin-bottom:1em;' });
+                ['Alias', 'ServerUrl', 'Username', 'Password'].forEach(function (field) {
+                    var wrap = el('div', { 'class': 'inputContainer' });
+                    var input = el('input', {
+                        'is': 'emby-input',
+                        'type': field === 'Password' ? 'password' : 'text',
+                        'id': 'fed-' + field + '-' + instance.__idx,
+                        'label': field === 'ServerUrl' ? 'Server URL' : field
+                    });
+                    input.value = instance[field] || '';
+                    wrap.appendChild(input);
+                    container.appendChild(wrap);
+                });
+                var testBtn = el('button', { 'is': 'emby-button', 'type': 'button', 'class': 'raised', 'data-idx': instance.__idx });
+                testBtn.textContent = 'Test connection';
+                testBtn.addEventListener('click', function () {
+                    testConnection(parseInt(this.getAttribute('data-idx'), 10));
+                });
+                container.appendChild(testBtn);
+                var removeBtn = el('button', { 'is': 'emby-button', 'type': 'button', 'class': 'raised', 'data-idx': instance.__idx });
+                removeBtn.textContent = 'Remove';
+                removeBtn.addEventListener('click', function () {
+                    // Re-sync from the DOM first so unsaved edits in any row are
+                    // kept, and the splice index (valid for the current render)
+                    // matches the collected array.
+                    window.__fedInstances = collectInstances();
+                    container.parentNode.removeChild(container);
+                    window.__fedInstances.splice(instance.__idx, 1);
+                    renderInstances();
+                });
+                container.appendChild(removeBtn);
+                var result = el('div', { 'class': 'testResult fieldDescription', 'id': 'fed-test-' + instance.__idx });
+                container.appendChild(result);
+                return container;
+            }
+
+            function renderInstances() {
+                var host = document.getElementById('federationInstances');
+                host.innerHTML = '';
+                window.__fedInstances.forEach(function (instance, idx) {
+                    instance.__idx = idx;
+                    host.appendChild(instanceRow(instance));
+                });
+            }
+
+            function collectInstances() {
+                return window.__fedInstances.map(function (instance, idx) {
+                    return {
+                        Alias: document.getElementById('fed-Alias-' + idx).value.trim(),
+                        ServerUrl: document.getElementById('fed-ServerUrl-' + idx).value.trim(),
+                        Username: document.getElementById('fed-Username-' + idx).value.trim(),
+                        Password: document.getElementById('fed-Password-' + idx).value
+                    };
+                });
+            }
+
+            function validate(instances) {
+                for (var i = 0; i < instances.length; i++) {
+                    var inst = instances[i];
+                    if (!inst.Alias || !inst.Username) { return 'Alias and username are required.'; }
+                    if (inst.Alias.indexOf('\u00b7') !== -1) { return 'Alias must not contain "\u00b7".'; }
+                    if (!/^https?:\/\/.+/.test(inst.ServerUrl)) { return 'Server URL must start with http:// or https://'; }
+                }
+                var aliases = instances.map(function (i) { return i.Alias.toLowerCase(); });
+                var dup = aliases.some(function (a, idx) { return aliases.indexOf(a) !== idx; });
+                if (dup) { return 'Duplicate aliases are not allowed.'; }
+                return null;
+            }
+
+            function testConnection(idx) {
+                var instances = collectInstances();
+                var inst = instances[idx];
+                var resultEl = document.getElementById('fed-test-' + idx);
+                if (!inst.ServerUrl) { resultEl.textContent = 'Server URL is required.'; return; }
+                var error = validate([inst]);
+                if (error) { resultEl.textContent = error; return; }
+                resultEl.textContent = 'Testing...';
+                ApiClient.ajax({
+                    url: ApiClient.getUrl('Federation/TestCredentials'),
+                    type: 'POST',
+                    data: JSON.stringify({ Alias: inst.Alias, ServerUrl: inst.ServerUrl, Username: inst.Username, Password: inst.Password }),
+                    contentType: 'application/json'
+                }).then(function (result) {
+                    if (result.ok) { resultEl.textContent = 'OK — ' + result.libraryCount + ' libraries visible.'; }
+                    else if (result.reason === 'InvalidCredentials') { resultEl.textContent = 'Login failed: wrong username or password.'; }
+                    else if (result.reason === 'Unreachable') { resultEl.textContent = 'Server unreachable.'; }
+                    else { resultEl.textContent = 'Server error.'; }
+                }, function () { resultEl.textContent = 'Request failed.'; });
+            }
+
+            document.querySelector('.federationConfigPage')
+                .addEventListener('pageshow', function () {
+                    window.__fedInstances = [];
+                    Dashboard.showLoadingMsg();
+                    ApiClient.getPluginConfiguration(FederationPluginConfig.uniquePluginId).then(function (config) {
+                        window.__fedInstances = (config.Instances || []).map(function (i) {
+                            return { Alias: i.Alias, ServerUrl: i.ServerUrl, Username: i.Username, Password: i.Password };
+                        });
+                        renderInstances();
+                        Dashboard.hideLoadingMsg();
+                    }, function () {
+                        Dashboard.hideLoadingMsg();
+                        document.getElementById('saveError').textContent = 'Failed to load configuration.';
+                    });
+                });
+
+            document.getElementById('addInstanceBtn')
+                .addEventListener('click', function () {
+                    // Keep any unsaved edits in the currently rendered rows.
+                    window.__fedInstances = collectInstances();
+                    window.__fedInstances.push({ Alias: '', ServerUrl: '', Username: '', Password: '' });
+                    renderInstances();
+                });
+
+            document.querySelector('.configForm')
+                .addEventListener('submit', function (e) {
+                    var instances = collectInstances();
+                    var error = validate(instances);
+                    var msg = document.getElementById('saveError');
+                    if (error) {
+                        msg.textContent = error;
+                        e.preventDefault();
+                        return false;
+                    }
+
+                    Dashboard.showLoadingMsg();
+                    ApiClient.getPluginConfiguration(FederationPluginConfig.uniquePluginId).then(function (config) {
+                        config.Instances = instances;
+                        ApiClient.updatePluginConfiguration(FederationPluginConfig.uniquePluginId, config).then(function () {
+                            Dashboard.processPluginConfigurationUpdateResult();
+                            document.getElementById('restartSection').style.display = '';
+                        }, function () {
+                            Dashboard.hideLoadingMsg();
+                            msg.textContent = 'Save failed.';
+                        });
+                    }, function () {
+                        Dashboard.hideLoadingMsg();
+                        msg.textContent = 'Save failed.';
+                    });
+
+                    e.preventDefault();
+                    return false;
+                });
+
+            document.getElementById('restartNowBtn')
+                .addEventListener('click', function () {
+                    Dashboard.confirm('Restart the server now?', 'Restart').then(function () {
+                        ApiClient.ajax({ url: ApiClient.getUrl('System/Restart'), type: 'POST' });
+                    });
+                });
+        </script>
+    </div>
+</body>
+</html>

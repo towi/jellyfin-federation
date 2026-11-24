@@ -36,4 +36,16 @@
     <None Remove="tests/**" />
     <None Remove="container/**" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- Dashboard page (IHasWebPages). LogicalName pins the manifest name in
+         both csprojs — the container project's path ("../src/...") would
+         otherwise derive a different one. -->
+    <EmbeddedResource Include="src/Web/config.html" LogicalName="Jellyfin.Plugin.Federation.Web.config.html" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Plugin logo (served by the host via meta.json "imagePath"). Deployed
+         next to the DLL — see README step 3. Link flattens it to the output
+         root (matching the container build) so the deploy copies one file. -->
+    <None Include="assets/logo.png" Link="logo.png" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

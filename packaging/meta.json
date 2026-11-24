@@ -1,0 +1,16 @@
+{
+  "category": "General",
+  "changelog": "1.0.0.0 - initial release",
+  "description": "Integrates remote Jellyfin servers as channels with stream proxying.",
+  "guid": "30c06888-1907-48cc-957a-6d83e86a39d7",
+  "name": "Jellyfin Federation",
+  "overview": "Connects one Jellyfin server to another; the remote's libraries show up as channels and all media is proxied through the local server.",
+  "owner": "towi",
+  "targetAbi": "12.2.0.0",
+  "timestamp": "2026-11-24T00:00:00.0000000Z",
+  "version": "1.0.0.0",
+  "status": "Active",
+  "autoUpdate": false,
+  "imagePath": "logo.png",
+  "assemblies": []
+}

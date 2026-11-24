@@ -59,11 +59,24 @@ target framework is `net10.0`).
 ```
 mkdir -p {dataDir}/plugins/Jellyfin.Plugin.Federation {dataDir}/plugins/configurations
 cp bin/Release/net10.0/Jellyfin.Plugin.Federation.dll {dataDir}/plugins/Jellyfin.Plugin.Federation/
+cp bin/Release/net10.0/logo.png {dataDir}/plugins/Jellyfin.Plugin.Federation/
+cp packaging/meta.json {dataDir}/plugins/Jellyfin.Plugin.Federation/meta.json
 ```
 
 `{dataDir}` is A's `JELLYFIN_DATA_DIR` (e.g. `/var/lib/jellyfin`).
+`meta.json` carries the plugin's metadata (name, version, `imagePath` for the
+logo); the host reads it at startup and preserves local values such as
+`imagePath` across restarts.
 
-### 4. Configure A
+### 4. Configure A — dashboard (recommended)
+
+In A's dashboard under **Plugins → Jellyfin Federation** you can manage instances
+(alias, server URL, username, password), test each connection, and save. Saving
+writes the same XML file shown below; **changes apply after a server restart** —
+the page offers a *Restart now* button. The plugin also exposes a non-sensitive
+status API, `GET /Federation/Status/Public` (alias, state, remote name/version,
+channel names — no URLs/usernames), for clients that want to display the status
+of all configured instances.
 
 Create `{dataDir}/plugins/configurations/Jellyfin.Plugin.Federation.xml`
 and lock it down — it holds a password
@@ -97,8 +110,10 @@ More `<FederationInstance>` blocks connect more remote servers.
 `paul · Movies`, `paul · Series`, … appear in A's sidebar. Play anything
 from any client of A.
 
-> B must be **reachable when A starts**: the login happens during startup.
-> If B is still down, the channels are missing until the next restart of A.
+> If B is **down when A starts**, its channels are created from the last known
+> libraries (views cache) and start working as soon as B is reachable again.
+> A **newly added** remote that has never been reachable produces no channels
+> until the next restart of A.
 
 ### If the servers are not on one network
 
@@ -111,9 +126,15 @@ changes.
 
 - The remote must be a **separate** server: self-federation is not
   supported (A answers its own startup login with 503).
-- The remote must be reachable **at A's startup**; see above.
+- A remote that is unreachable at A's startup still shows its channels (from
+  the last known libraries) and starts working as soon as it is reachable
+  again. A **newly added** remote that has never been reachable produces no
+  channels until the next restart.
 - Play state stays local; B does not see playback.
 - Config changes require a restart of A.
+- The status monitor never logs in to the remote; it only calls the
+  unauthenticated `/System/Info/Public`. Credential problems are detected
+  through failed authenticated requests or the page's Test button.
 - Search finds remote items only after they have been browsed once.
 - The remote access token is part of the stream URLs, so it appears in
   ffmpeg command lines, A's logs, and `PlaybackInfo` responses (visible to
@@ -122,6 +143,20 @@ changes.
 - Each start of A creates a new device row on B ("Jellyfin Federation");
   older rows must **not** be deleted while their images are in use — see
   invariant 2 in [AGENTS.md](AGENTS.md#architecture-invariants).
+- The dashboard's **plugin detail page** (the list entry under
+  *Plugins*, not the plugin's own settings page) shows developer,
+  repository and update info only for plugins published in a package
+  repository. This plugin is sideloaded, so that page shows no repository
+  metadata and reports an error when it tries to look the plugin up in the
+  official repository. This does not affect the plugin itself; the settings
+  page works normally.
+- The settings page is visible to **administrators only** in the web client:
+  the host serves the configuration-page list (`web/ConfigurationPages`) and
+  the `configurationpage` SPA route with admin rights only (host constraint,
+  not a plugin setting). Regular users or custom clients can display a
+  reduced, non-sensitive status via
+  `GET /Federation/Status/Public` (alias, state, remote version, channel
+  names — no URLs/usernames).
 
 ## Development
 

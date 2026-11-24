@@ -24,6 +24,8 @@ public class RemoteApiClient : IDisposable
     private string _deviceId = string.Empty;
     private string _username = string.Empty;
     private string _password = string.Empty;
+    private Action<RemoteApiReport>? _reporter;
+    private DateTimeOffset? _lastAuthenticatedUtc;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="RemoteApiClient"/> class.
@@ -35,15 +37,16 @@ public class RemoteApiClient : IDisposable
     }
 
     /// <summary>
-    /// Configures the client for one federation instance and logs in.
+    /// Prepares the client for one federation instance without logging in:
+    /// stores the base URL, device id, and credentials. The views-cache fallback
+    /// builds channels with this alone (the remote may be down); the login then
+    /// happens proactively on the first authenticated request (GetJsonAsync).
     /// </summary>
     /// <param name="alias">Instance alias from the config; part of the device id.</param>
     /// <param name="serverUrl">Remote base URL (a trailing slash is tolerated).</param>
     /// <param name="username">Remote user name.</param>
     /// <param name="password">Remote password.</param>
-    /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>The remote user id of the logged in user.</returns>
-    public async Task<Guid> ConfigureAsync(string alias, string serverUrl, string username, string password, CancellationToken cancellationToken)
+    public void Prepare(string alias, string serverUrl, string username, string password)
     {
         BaseUrl = serverUrl.TrimEnd('/');
 
@@ -81,8 +84,31 @@ public class RemoteApiClient : IDisposable
         // can be renewed mid-run (see GetJsonAsync) without a server restart.
         _username = username;
         _password = password;
+    }
 
-        return await LoginAsync(cancellationToken).ConfigureAwait(false);
+    /// <summary>
+    /// Prepares credentials and logs in (startup path). A failed login is
+    /// reported through the outcome reporter — startup 401s must surface as
+    /// InvalidCredentials, not a green Online probe.
+    /// </summary>
+    /// <param name="alias">Instance alias from the config; part of the device id.</param>
+    /// <param name="serverUrl">Remote base URL (a trailing slash is tolerated).</param>
+    /// <param name="username">Remote user name.</param>
+    /// <param name="password">Remote password.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The remote user id of the logged in user.</returns>
+    public async Task<Guid> ConfigureAsync(string alias, string serverUrl, string username, string password, CancellationToken cancellationToken)
+    {
+        Prepare(alias, serverUrl, username, password);
+        try
+        {
+            return await LoginAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (!(ex is OperationCanceledException && cancellationToken.IsCancellationRequested))
+        {
+            Report(ex);
+            throw;
+        }
     }
 
     private static string SanitizeDeviceIdPart(string alias)
@@ -158,6 +184,17 @@ public class RemoteApiClient : IDisposable
     public string AccessToken => _accessToken;
 
     /// <summary>
+    /// Gets the UTC time of the last successful authenticated request, or null if none succeeded yet.
+    /// </summary>
+    public DateTimeOffset? LastAuthenticatedUtc => _lastAuthenticatedUtc;
+
+    /// <summary>
+    /// Sets the outcome reporter invoked after every authenticated request; null removes it.
+    /// </summary>
+    /// <param name="reporter">The reporter, or null.</param>
+    public void SetReporter(Action<RemoteApiReport>? reporter) => _reporter = reporter;
+
+    /// <summary>
     /// Gets one page of items under a remote parent.
     /// </summary>
     /// <param name="remoteParentId">Remote parent item id (hex string).</param>
@@ -209,33 +246,87 @@ public class RemoteApiClient : IDisposable
 
     private async Task<T> GetJsonAsync<T>(string url, CancellationToken cancellationToken)
     {
-        // Snapshot the token used for this request: it is the only one that can be
-        // the rejected one. Reading the field again after the round trip could pick
-        // up a token another thread refreshed in the meantime and re-login again,
-        // which (same DeviceId) would invalidate that fresh token.
-        var token = _accessToken;
-        var response = await SendGetAsync(url, token, cancellationToken).ConfigureAwait(false);
-        if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized)
+        try
         {
-            // Token revoked or expired (remote logout, password change, DB reset):
-            // log in once and repeat the request. The fresh request is never retried again.
-            response.Dispose();
-            var refreshedToken = await RefreshTokenAsync(token, cancellationToken).ConfigureAwait(false);
-            response = await SendGetAsync(url, refreshedToken, cancellationToken).ConfigureAwait(false);
-        }
-
-        using (response)
-        {
-            if (!response.IsSuccessStatusCode)
+            // Token-less self-heal (views-cache fallback, Task 3): a prepared but
+            // not-logged-in client logs in proactively before the first request,
+            // single-flight under _loginLock so concurrent first callers share one
+            // login (a duplicate login would create a second device row on the
+            // remote, invariant 2). No request is ever sent with an empty ApiKey.
+            if (string.IsNullOrEmpty(_accessToken))
             {
-                throw new FederationException($"Remote server returned {(int)response.StatusCode} for {url}");
+                await _loginLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    if (string.IsNullOrEmpty(_accessToken))
+                    {
+                        await LoginAsync(cancellationToken).ConfigureAwait(false);
+                    }
+                }
+                finally
+                {
+                    _loginLock.Release();
+                }
             }
 
-            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-            return await JsonSerializer.DeserializeAsync<T>(stream, FederationJsonOptions.Options, cancellationToken).ConfigureAwait(false)
-                ?? throw new FederationException($"Empty response from remote server for {url}");
+            // Snapshot the token used for this request: it is the only one that can be
+            // the rejected one. Reading the field again after the round trip could pick
+            // up a token another thread refreshed in the meantime and re-login again,
+            // which (same DeviceId) would invalidate that fresh token.
+            var token = _accessToken;
+            var response = await SendGetAsync(url, token, cancellationToken).ConfigureAwait(false);
+            if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized)
+            {
+                // Token revoked or expired (remote logout, password change, DB reset):
+                // log in once and repeat the request. The fresh request is never retried again.
+                response.Dispose();
+                var refreshedToken = await RefreshTokenAsync(token, cancellationToken).ConfigureAwait(false);
+                response = await SendGetAsync(url, refreshedToken, cancellationToken).ConfigureAwait(false);
+            }
+
+            T result;
+            using (response)
+            {
+                if (!response.IsSuccessStatusCode)
+                {
+                    throw new FederationException($"Remote server returned {(int)response.StatusCode} for {url}");
+                }
+
+                await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+                result = await JsonSerializer.DeserializeAsync<T>(stream, FederationJsonOptions.Options, cancellationToken).ConfigureAwait(false)
+                    ?? throw new FederationException($"Empty response from remote server for {url}");
+            }
+
+            _lastAuthenticatedUtc = DateTimeOffset.UtcNow;
+            _reporter?.Invoke(new RemoteApiReport(true, null, false));
+            return result;
+        }
+        catch (Exception ex) when (!(ex is OperationCanceledException && cancellationToken.IsCancellationRequested))
+        {
+            // The reporter is invoked before rethrowing — the channel's own
+            // catch/log flow stays unchanged.
+            Report(ex);
+            throw;
         }
     }
+
+    private void Report(Exception ex)
+    {
+        _reporter?.Invoke(new RemoteApiReport(
+            Succeeded: false,
+            Error: SanitizeError(ex),
+            AuthFailed: ex is FederationException { StatusCode: 401 or 403 }));
+    }
+
+    // Fixed category strings only, never raw exception text (invariant 9 — the
+    // status surface is logged): the URL may carry ApiKey, so it is never included.
+    private static string SanitizeError(Exception ex)
+        => ex switch
+        {
+            FederationException f => f.StatusCode is null ? "remote error" : $"remote returned {f.StatusCode}",
+            TaskCanceledException => "timeout",
+            _ => "unreachable"
+        };
 
     private Task<HttpResponseMessage> SendGetAsync(string url, string accessToken, CancellationToken cancellationToken)
     {

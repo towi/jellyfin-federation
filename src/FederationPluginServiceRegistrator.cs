@@ -6,6 +6,7 @@ using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller.Channels;
 using MediaBrowser.Controller.Plugins;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Plugin.Federation;
@@ -39,9 +40,32 @@ public class FederationPluginServiceRegistrator : IPluginServiceRegistrator
         serviceCollection.AddSingleton(logger);
 
         var config = LoadConfig(appPaths, logger);
+
+        // Per-instance views cache so channels survive a remote being down at
+        // startup (spec phase 3). DataPath, not the purged image cache.
+        var viewsCache = new FederationViewsCache(appPaths.DataPath, logger);
+
+        // Unauthenticated reachability probe (invariant 11). The config is fixed
+        // at startup (restart-on-change semantics), so a closure is correct.
+        var status = new FederationStatusService(
+            () => config,
+            new HttpClient { Timeout = TimeSpan.FromSeconds(5) },
+            logger);
+
+        // Register every instance so status rows carry ServerUrl/Username from
+        // startup (the probe loop alone would only give it state, not the
+        // identifying fields).
+        foreach (var instance in config.Instances)
+        {
+            status.RegisterInstance(instance);
+        }
+
         var factory = new FederationChannelFactory(
             () => new RemoteApiClient(new HttpClient { Timeout = TimeSpan.FromSeconds(15) }),
-            logger);
+            logger,
+            viewsCache: viewsCache,
+            clientSetup: (client, alias) => client.SetReporter(report => status.ReportOutcome(alias, report)),
+            status: status);
 
         // Blocking is acceptable for V1: failed or slow instances are skipped
         // after a bounded number of login attempts (worst case per instance is
@@ -64,6 +88,16 @@ public class FederationPluginServiceRegistrator : IPluginServiceRegistrator
             // ChannelManager receives all of them through its IEnumerable<IChannel>.
             serviceCollection.AddSingleton(typeof(IChannel), channel);
         }
+
+        // The status service as singleton (the controller reads it) and as
+        // IHostedService (the probe loop starts/stops with the host).
+        serviceCollection.AddSingleton(status);
+        serviceCollection.AddSingleton<IHostedService>(status);
+
+        // The controller's test-credentials factory: a throwaway client per test
+        // (fresh DeviceId via ConfigureAsync — invariant 2 is satisfied).
+        serviceCollection.AddSingleton<Func<RemoteApiClient>>(
+            sp => () => new RemoteApiClient(new HttpClient { Timeout = TimeSpan.FromSeconds(15) }));
     }
 
     /// <summary>

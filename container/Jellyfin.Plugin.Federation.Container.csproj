@@ -15,6 +15,20 @@
     <Compile Include="../src/**/*.cs" />
   </ItemGroup>
   <ItemGroup>
+    <!-- Dashboard page (IHasWebPages); LogicalName must match the main
+         csproj so the manifest resource name is identical in both builds. -->
+    <EmbeddedResource Include="../src/Web/config.html" LogicalName="Jellyfin.Plugin.Federation.Web.config.html" />
+    <!-- Plugin logo (served by the host via meta.json "imagePath"). -->
+    <None Include="../assets/logo.png" Link="logo.png" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <!-- The source-checkout target inherits Microsoft.AspNetCore.App transitively
+       through the MediaBrowser.Common project reference; plain HintPath DLL
+       references do not flow FrameworkReferences, so the container target needs
+       this explicitly. Compile-time only — the host loads the shared framework. -->
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+  <ItemGroup>
     <!-- The exact binaries shipped in the linuxserver/jellyfin 12.2.0 container.
          Not copied into the output: the container provides them at runtime.
          Extract from a running container, one per assembly, e.g. (linuxserver image):
@@ -47,6 +61,13 @@
     </Reference>
     <Reference Include="Microsoft.Extensions.DependencyInjection.Abstractions">
       <HintPath>../container-refs/DependencyInjection.Abstractions.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <!-- IHostedService (FederationStatusService). Ships in the image's shared
+         framework; re-extract from a running container if the image is upgraded:
+           docker cp jellyfin:/usr/lib/jellyfin/bin/Microsoft.Extensions.Hosting.Abstractions.dll container-refs/Hosting.Abstractions.dll -->
+    <Reference Include="Microsoft.Extensions.Hosting.Abstractions">
+      <HintPath>../container-refs/Hosting.Abstractions.dll</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>
