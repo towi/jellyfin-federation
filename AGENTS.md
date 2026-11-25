@@ -194,13 +194,21 @@ each one failed in production or review before being pinned this way.
    register-every-candidate pattern and its triple-collision test.
 
 5. **`MediaSourceInfo.Path` is the remote stream URL, with
-   `IsRemote = false`, `Protocol = Http`.**
+   `IsRemote = false`, `Protocol = Http`, `SupportsDirectPlay = false`.**
    `IsRemote = true` makes host code (e.g. `UniversalAudioController`,
    `MediaInfoHelper`) redirect the client to that URL instead of serving
    through the local pipeline — which would break clients without a route
-   to B. `IsRemote = false` keeps ffmpeg on A as the single byte mover.
-   Do not "simplify" by returning a local-looking path: ffmpeg pulls the
-   remote URL directly, including Range requests for seeking.
+   to B. `IsRemote = false` keeps ffmpeg on A as the single byte mover —
+   but only for transcode/direct-stream: **direct play has the client open
+   `Path` itself**, bypassing A entirely. So direct play is refused
+   (`SupportsDirectPlay = false` in `MediaSourceMapper`); the host's
+   StreamBuilder then only offers direct stream or transcode, both of
+   which request A's stream endpoint, and A pulls `Path` server-side.
+   Symptom of direct play leaking through: clients on the same tunnel as
+   B play while other clients hang on the connect (TV without a route to
+   B), with no stream request reaching A. Do not "simplify" by returning
+   a local-looking path: ffmpeg pulls the remote URL directly, including
+   Range requests for seeking.
 
 6. **People/Artists are mapped with a null/blank-Name guard.**
    The host's `PeopleRepository.UpdatePeople` calls `person.Name.Trim()`
@@ -230,12 +238,17 @@ each one failed in production or review before being pinned this way.
    anything that surfaces URLs in logs (see `DiagnosticSink`), re-check
    that no *new* secret material is added to log lines.
 
-10. **`DataVersion` = `SHA256(alias | remoteLibraryId | serverUrl)`**
+10. **`DataVersion` = `SHA256(alias | remoteLibraryId | serverUrl | salt)`**
     (no library name). The host's per-channel cache path already includes
     the channel name (which carries the view name), so a remote view rename
     rotates the cache via the name; keeping the name out of the hash stops
-    the dedup suffixes (invariant 4) from churning it. Vary these three
-    components in the `DataVersion` tests, not the library name.
+    the dedup suffixes (invariant 4) from churning it. The trailing constant
+    salt (`DataFormatSalt`) is bumped whenever the *shape* of the channel
+    data changes, so the host's per-folder item-result cache (keyed by this
+    hash) is invalidated exactly once and existing items re-hydrate — this
+    is how the info-panel display media source was backfilled. Vary the
+    alias/library/url components in the `DataVersion` tests, not the library
+    name; the test also pins the full hash so a salt bump is visible.
 
 11. **The status monitor never authenticates.** `FederationStatusService`
     only calls the remote's unauthenticated `/System/Info/Public`. A login
@@ -259,7 +272,7 @@ each one failed in production or review before being pinned this way.
 ## Testing
 
 ```
-dotnet test -c Release        # 77 tests, all offline
+dotnet test -c Release        # 89 tests, all offline
 ```
 
 - HTTP behavior is tested through `FakeHttpMessageHandler`
@@ -315,6 +328,11 @@ additions:
 - Search only finds remote items after they have been browsed (host
   channel hydration drives the search index).
 - Config changes require a server restart (no hot reload).
+- The info panel's media source is a hydration-time snapshot (design
+  decision 6 in `docs/design.md`): if B re-encodes or re-muxes an item,
+  the panel stays stale until the item re-hydrates (same class of
+  constraint as invariant 7). Playback is unaffected — it always goes
+  through the live `PlaybackInfo` callback.
 - External subtitle files on B are hidden (they reference paths on B's
   disk); only embedded subtitle streams are offered, so selection cannot
   fail mid-playback.

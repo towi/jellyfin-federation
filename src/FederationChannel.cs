@@ -53,6 +53,14 @@ public class FederationChannel : IChannel, IRequiresMediaInfoCallback
     public ChannelParentalRating ParentalRating => ChannelParentalRating.GeneralAudience;
 
     /// <summary>
+    /// Bumped when the shape of the channel data changes (the info-panel display
+    /// media source was added in this build), so the host's per-folder item cache
+    /// (keyed by this hash) is invalidated exactly once and existing items are
+    /// re-hydrated.
+    /// </summary>
+    private const string DataFormatSalt = "m1";
+
+    /// <summary>
     /// Gets a hash over the stable configuration so the channel manager invalidates caches on config change.
     /// The access token is deliberately excluded: it changes on every login and would
     /// invalidate the channel item caches on each plugin restart.
@@ -61,7 +69,7 @@ public class FederationChannel : IChannel, IRequiresMediaInfoCallback
     {
         get
         {
-            var raw = string.Join('|', _options.Alias, _options.RemoteLibraryId, _options.ServerUrl);
+            var raw = string.Join('|', _options.Alias, _options.RemoteLibraryId, _options.ServerUrl, DataFormatSalt);
             return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(raw))).ToLowerInvariant();
         }
     }

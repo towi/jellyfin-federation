@@ -88,6 +88,7 @@ public class RemoteApiClientTests
         Assert.Contains("StartIndex=0", query);
         Assert.Contains("Limit=50", query);
         Assert.Contains("Fields=", query);
+        Assert.Contains("MediaSources", query);
         Assert.Contains("EnableImages=true", query);
         Assert.Contains("SortBy=SortName", query);
     }

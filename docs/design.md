@@ -49,7 +49,7 @@ Verifiziert am Codebestand: `ChannelManager` (src/Jellyfin.LiveTv/Channels/Chann
 - Browsen: `Channel.GetItemsInternal` (MediaBrowser.Controller/Channels/Channel.cs:48-63) → `ChannelManager.GetChannelItemsInternal` (ChannelManager.cs:709-779) inkl. File-Cache (3h), Dead-Item-Cleanup, DB-Hydration.
 - Hierarchie: `ChannelFolderType.Series/Season/MusicAlbum/MusicArtist/PhotoAlbum` → Entities `Series/Season/MusicAlbum/...` (ChannelManager.cs:986-1014).
 - IDs: deterministisch via `GetNewItemId(remoteId + channelName + "16", type)` (ChannelManager.cs:941-976); Remote-ID in `BaseItemEntity.ExternalId` (existierende Spalte, keine Migration).
-- MediaSources: Plugin-seitig via `IRequiresMediaInfoCallback.GetChannelItemMediaInfo` → `GetDynamicMediaSources` (ChannelManager.cs:384-417), 5-Min-MemoryCache.
+- MediaSources: Plugin-seitig via `IRequiresMediaInfoCallback.GetChannelItemMediaInfo` → `GetDynamicMediaSources` (ChannelManager.cs:384-417), 5-Min-MemoryCache; zusätzlich eine statische Display-Quelle pro Item (Placeholder, persistiert bei der Hydration, aus dem Playback gefiltert) für das Info-Panel — s. Design-Entscheidung 6.
 - Sichtbarkeit: `Channel.IsVisible` + `EnableAllChannels` (default true für neue User, Jellyfin.Data/UserEntityExtensions.cs:192) → per User abschaltbar ohne neue UI.
 - Plugin-Registrierung: `IPluginServiceRegistrator` (MediaBrowser.Controller/Plugins/IPluginServiceRegistrator.cs, entdeckt in PluginManager.cs:208-238) registriert Services; `ChannelManager` nimmt `IEnumerable<IChannel>` per DI (ChannelManager.cs:81-92).
 
@@ -106,7 +106,7 @@ Pro Instanz ruft das Plugin beim Start (nach Login) `GET {ServerUrl}/Users/{remo
 
 ### 1. Browsen
 
-Client → `GET /Channels/{channelId}/Items?ParentId=…` → `ChannelManager.GetChannelItemsInternal` → Plugin `GetChannelItems(InternalChannelItemQuery{FolderId=ExternalId des Parent})` → Remote-API `GET /Items?ParentId={remoteId}&Fields=Overview,Genres,People,MediaSources,Path&EnableImages=true&…` → Mapping zu `ChannelItemInfo[]` (Name, Overview, Genres, Studios, People, CommunityRating, RunTimeTicks, PremiereDate, ProductionYear, IndexNumber/ParentIndexNumber, `ImageUrl` = Remote-Primary-Image-URL, `FolderType` entsprechend) → `ChannelManager.GetChannelItemEntityAsync` erstellt/updated Entities und lädt Bilder.
+Client → `GET /Channels/{channelId}/Items?ParentId=…` → `ChannelManager.GetChannelItemsInternal` → Plugin `GetChannelItems(InternalChannelItemQuery{FolderId=ExternalId des Parent})` → Remote-API `GET /Items?ParentId={remoteId}&Fields=Overview,Genres,Studios,People,ProviderIds,OriginalTitle,PremiereDate,ProductionYear,RunTimeTicks,CommunityRating,ChildCount,MediaSources&EnableImages=true&…` → Mapping zu `ChannelItemInfo[]` (Name, Overview, Genres, Studios, People, CommunityRating, RunTimeTicks, PremiereDate, ProductionYear, IndexNumber/ParentIndexNumber, `ImageUrl` = Remote-Primary-Image-URL, `FolderType` entsprechend) → `ChannelManager.GetChannelItemEntityAsync` erstellt/updated Entities und lädt Bilder. `MediaSources` wird für das Info-Panel des Hosts gebraucht (s. Design-Entscheidung 6); die `Path`-Spalten der Remote-Antwort werden bewusst ignoriert (Remote-Dateisystem).
 
 Sortierung/Paging: der `InternalChannelItemQuery` gibt `StartIndex/Limit/SortBy` nicht vollständig durch — das Plugin lädt die Parent-Liste komplett (mit File-Cache des ChannelManagers, 3h) und überlässt Filter/Sort/Paging dem ChannelManager (bestehender Flow).
 
@@ -119,10 +119,10 @@ Client → `POST /Items/{localId}/PlaybackInfo` → `MediaSourceManager.GetMedia
    - `Path = {ServerUrl}/Videos/{remoteId}/stream?MediaSourceId={remoteMediaSourceId}&Static=true&ApiKey={AccessToken}` (Audio analog `/Audio/{remoteId}/stream`)
    - `Protocol = MediaProtocol.Http`
    - `IsRemote = false`
-   - `SupportsDirectPlay/SupportsDirectStream/SupportsTranscoding = true`
-3. `MediaInfoHelper.SetDeviceSpecificData` (Jellyfin.Api/Helpers/MediaInfoHelper.cs:182-359) entscheidet per StreamBuilder anhand des **Client**-Device-Profils DirectPlay vs. Transcode — die Remote-MediaStreams liefern die Codec-/Container-Fakten dafür.
+   - `SupportsDirectPlay = false`, `SupportsDirectStream = true`, `SupportsTranscoding = true` (Direct Play muss der Client niemals selbst ausführen — Entscheidung 2)
+3. `MediaInfoHelper.SetDeviceSpecificData` (Jellyfin.Api/Helpers/MediaInfoHelper.cs:182-359) entscheidet per StreamBuilder anhand des **Client**-Device-Profils, ob Direct Stream oder Transcode erlaubt ist — die Remote-MediaStreams liefern die Codec-/Container-Fakten dafür. Direct Play ist immer deaktiviert (Entscheidung 2), damit der Client nie selbst `Path` öffnet.
 
-### 3. Stream — Direct Play (TV kann Codec abspielen)
+### 3. Stream — Direct Stream (TV kann Codec abspielen)
 
 Client → `GET /Videos/{localId}/stream?static=true&MediaSourceId=…` → `StreamingHelpers.GetStreamingState` → `state.InputProtocol == Http`, `state.InputPath` = Remote-URL → **existierender Branch** VideosController.cs:456-460 → `FileStreamResponseHelpers.GetStaticRemoteStreamResult`: Server öffnet Remote-Stream und piped Bytes; Range/Seek werden durchgereicht. Musik identisch über AudioHelper.cs:116-119 (`isStatic` wird server-seitig aus `SupportsDirectStream` gesetzt, UniversalAudioController.cs:182,236).
 
@@ -132,10 +132,16 @@ Client → `GET /Videos/{localId}/stream?static=true&MediaSourceId=…` → `Str
 
 ## Verifizierte Design-Entscheidungen
 
-1. **`IsRemote = false` auf allen MediaSources.** Beide Redirect-Fallen sind auf `IsRemote=true` gegated — sonst bekäme der TV eine Tailscale-URL: `UniversalAudioController.cs:175` (`SupportsDirectPlay && Protocol==Http && IsRemote && enableRemoteMedia` → 302) und `MediaInfoHelper.cs:307` (`IsRemote && ForceRemoteSourceTranscoding` → Remote-Transcode-URL). Mit `IsRemote=false` kein Redirect, Client-Server bleibt Proxy.
-2. **Audio-Pipe ohne Client-Mitwirkung**: `isStatic` wird aus `SupportsDirectStream` server-seitig bestimmt (UniversalAudioController.cs:182), nicht vom Client-Parameter `static` — TV-Clients brauchen nichts Besonderes zu senden.
-3. **Keine DB-Migration**: `BaseItemEntity.ExternalId` (string, existierend) speichert die Remote-ID; `ChannelId` (Guid?, existierend) macht die Items zu Channel-Items.
-4. **`SupportsDirectStream(path, Http) == true`** (MediaSourceManager.cs:280-301) für Stream-URLs → Audio/Video-DirectPlay läuft als Pipe.
+1. **`IsRemote = false` auf allen MediaSources.** Beide Redirect-Fallen sind auf `IsRemote=true` gegated — sonst würde der Host den Client per 302 direkt zur Remote-URL schicken: `UniversalAudioController.cs:175` (`SupportsDirectPlay && Protocol==Http && IsRemote && enableRemoteMedia` → 302) und `MediaInfoHelper.cs:307` (`IsRemote && ForceRemoteSourceTranscoding` → Remote-Transcode-URL).
+2. **`SupportsDirectPlay = false` auf allen MediaSources (2026-11-25).** `IsRemote=false` schützt *nicht* vor der zweiten Direktzugriff-Falle: **Direct Play lässt den Client `Path` selbst öffnen** — ohne jeden Request an den Client-Server. Clients mit Route zum Remote (z.B. im selben Tailscale-Tunnel) spielen dann ab, alle anderen hängen auf dem Connect (beobachtet: Samsung TV ohne Route → 1-Min-Spinner, null Stream-Requests auf A, nur die `PlaybackInfo`-Aufrufe im Log). Mit `SupportsDirectPlay=false` bietet der Host-StreamBuilder nur noch Direct Stream (Client → A `/stream?Static=true`, A zieht `Path`) oder Transcode (ffmpeg auf A liest `Path`) an — in beiden Fällen bleibt A der einzige Byte-Mover. *Client-Quell-Verifikation* (jellyfin-web v12.2 `playbackmanager.js`, auch in der Tizen-Web-App): `enableDirectPlay` (true, wenn `SupportsDirectPlay` vom Server **und** ein Client-DirectPlayProfile matchen) → `mediaUrl = mediaSource.Path` (direkte Öffnung der Remote-URL); sonst `SupportsDirectStream` → `mediaUrl = {server}/Videos/{id}/stream?Static=true` (über den Client-Server). Ein Gegenbeispiel, das die Richtung beweist: ein HEVC-in-MKV-Film lief über den TV 8,8 min sauber über A — der Client requestete A's Stream-Endpunkt (ffmpeg-Remux auf A), also kein DirectPlay.
+3. **Audio-Pipe ohne Client-Mitwirkung**: `isStatic` wird aus `SupportsDirectStream` server-seitig bestimmt (UniversalAudioController.cs:182), nicht vom Client-Parameter `static` — TV-Clients brauchen nichts Besonderes zu senden.
+4. **Keine DB-Migration**: `BaseItemEntity.ExternalId` (string, existierend) speichert die Remote-ID; `ChannelId` (Guid?, existierend) macht die Items zu Channel-Items.
+5. **`SupportsDirectStream(path, Http) == true`** (MediaSourceManager.cs:280-301) für Stream-URLs → Direct Stream (HLS-Remux bzw. statisches Piping) ist für Audio/Video erlaubt; es wird über den Client-Server abgewickelt (A zieht `Path`), nicht vom Client direkt.
+6. **Display-only MediaSource für das Info-Panel (2026-11-25).** Das Item-Info-Panel des Hosts liest die *statischen* (persistierten) MediaSources — für Channel-Items sonst ein leerer Stub, weil Media-Info erst im Playback-Pfad via `IRequiresMediaInfoCallback` ankommt. Das Plugin liefert deshalb pro Video-/Audio-Item zusätzlich eine Display-Quelle in `ChannelItemInfo.MediaSources` (aus der Items-Query, `Fields=…MediaSources`), mit harten Constraints:
+   - `Type = Placeholder`: der Host filtert Placeholder-Quellen aus der Playback-Liste (`MediaSourceManager.SortMediaSources`, `.Where(Type != Placeholder)`) → die frische Dynamic-Quelle bleibt die einzig abspielbare; das Info-Panel rendert Placeholder-Quellen und ihre Streams trotzdem (jellyfin-web `itemMediaInfo.js`).
+   - `Id` bleibt bewusst `null`, damit `NormalizeMediaSources` die lokale Item-Id einsetzt (wird so von der Per-User-Filterung der statischen Quellen behalten); `Path` bleibt `null`, weil `ChannelManager.GetChannelItemEntityAsync` `item.Path` aus der ersten Quelle setzt — eine Stream-URL hier würde den Remote-Token + Remote-Pfad in die lokale DB schreiben.
+   - Streams werden geclont und `Path`/`DeliveryUrl` geleert, externe Untertitel werden weggefiltert (gleiche Regel wie im `MediaSourceMapper`).
+   - Backfill für bereits hydratisierte Items: `ChannelItemInfo.DateModified` = fester Zeitstempel (`DisplaySourceBackfillStamp`) → der Host-Trigger `info.DateModified > item.DateModified` feuert `forceUpdate` genau einmal pro Item (Value wird persistiert, danach gleich), und `DataVersion` trägt einen Format-Salt (`DataFormatSalt`), damit der 3h-Item-Cache des Hosts einmal invalidated wird (Invariant 10).
 
 ## Trade-off (bekannt und akzeptiert)
 

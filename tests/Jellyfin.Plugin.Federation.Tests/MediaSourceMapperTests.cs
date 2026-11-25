@@ -36,7 +36,10 @@ public class MediaSourceMapperTests
         Assert.EndsWith("&Static=true&ApiKey=testtoken123", source.Path, StringComparison.Ordinal);
         Assert.Equal(MediaProtocol.Http, source.Protocol);
         Assert.False(source.IsRemote);
-        Assert.True(source.SupportsDirectPlay);
+        // Direct play is refused: it would make the client open the remote URL
+        // itself, bypassing this server (clients without a route to the remote
+        // hang forever on the connect).
+        Assert.False(source.SupportsDirectPlay);
         Assert.True(source.SupportsDirectStream);
         Assert.True(source.SupportsTranscoding);
         Assert.Equal("mkv", source.Container);

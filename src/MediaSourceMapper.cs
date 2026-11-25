@@ -55,7 +55,14 @@ public static class MediaSourceMapper
             Path = streamUrl,
             Protocol = MediaProtocol.Http,
             IsRemote = false,
-            SupportsDirectPlay = true,
+            // Direct play must be refused: the client would open Path (the remote
+            // server's absolute URL) itself, bypassing this server entirely.
+            // Clients that can reach the remote (e.g. on the same tunnel) then
+            // work while others hang forever on the connect - observed with a
+            // Samsung TV that has no route to the remote. With direct play off,
+            // the host only offers direct stream or transcode, both of which
+            // request THIS server's stream endpoint and let it pull Path.
+            SupportsDirectPlay = false,
             SupportsDirectStream = true,
             SupportsTranscoding = true,
             RequiresOpening = false,

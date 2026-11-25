@@ -117,6 +117,11 @@ changes.
   unauthenticated `/System/Info/Public`. Credential problems are detected
   through failed authenticated requests or the page's Test button.
 - Search finds remote items only after they have been browsed once.
+- The item info panel (codec, resolution, bitrate) shows a snapshot taken
+  when the item was loaded. If the file is re-encoded on the remote server,
+  the panel keeps the old values; playback itself is always up to date.
+  Loading a folder fetches each item's stream metadata from the remote
+  server, which is slightly slower than a bare item list.
 - The remote access token is part of the stream URLs, so it appears in
   ffmpeg command lines, A's logs, and `PlaybackInfo` responses (visible to
   local users who can play the item). Treat A's logs as secret material

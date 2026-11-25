@@ -208,12 +208,12 @@ public class RemoteApiClient : IDisposable
         int? limit,
         CancellationToken cancellationToken)
     {
-        // Only the fields ItemMapper consumes. MediaSources and Path are deliberately
-        // not requested: media sources arrive at playback time via PlaybackInfo, and
-        // the physical path is on the remote disk — both would bloat every folder
-        // load for no consumer.
+        // Only the fields ItemMapper consumes. MediaSources is requested for the
+        // host's item info panel (static/persisted display source); its streams
+        // are scrubbed before persistence (no remote paths/urls). Path is
+        // deliberately not requested: it is on the remote disk.
         var url = $"Items?ParentId={remoteParentId}"
-            + "&Fields=Overview,Genres,Studios,People,ProviderIds,OriginalTitle,PremiereDate,ProductionYear,RunTimeTicks,CommunityRating,ChildCount"
+            + "&Fields=Overview,Genres,Studios,People,ProviderIds,OriginalTitle,PremiereDate,ProductionYear,RunTimeTicks,CommunityRating,ChildCount,MediaSources"
             + "&EnableImages=true&ImageTypeLimit=1&EnableImageTypes=Primary"
             + "&SortBy=SortName&SortOrder=Ascending"
             + (startIndex.HasValue ? $"&StartIndex={startIndex.Value}" : string.Empty)

@@ -104,6 +104,13 @@ public class FederationChannelTests
         // 64 hex chars = SHA-256
         Assert.Matches("^[0-9a-f]{64}$", first.DataVersion);
 
+        // The hash includes a data-format salt, so a persisted-state format
+        // change can invalidate the host's item cache by bumping it in one
+        // place (see DataFormatSalt).
+        Assert.Equal(
+            "7486bd11c254ce1706f770b376295b0d3f0db00014b3a2ea67b1e30fe04f05f3",
+            first.DataVersion);
+
         // The display name is NOT part of the version (it can change on dedup
         // without the remote library changing); the remote library id is.
         var renamed = new FederationChannel(

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json;
 using Jellyfin.Data.Enums;
 using MediaBrowser.Controller.Channels;
 using MediaBrowser.Controller.Entities;
@@ -15,6 +16,13 @@ namespace Jellyfin.Plugin.Federation;
 /// </summary>
 public static class ItemMapper
 {
+    /// <summary>
+    /// Fixed stamp assigned to every item's <see cref="ChannelItemInfo.DateModified"/>
+    /// so the host's forceUpdate path persists the info-panel display media source
+    /// for items hydrated before it existed (one-shot; see the assignment below).
+    /// </summary>
+    private static readonly DateTime DisplaySourceBackfillStamp = new(2026, 11, 25, 0, 0, 0, DateTimeKind.Utc);
+
     /// <summary>
     /// Converts one remote item DTO into channel item info.
     /// </summary>
@@ -95,9 +103,91 @@ public static class ItemMapper
             info.MediaType = ChannelMediaType.Video;
         }
 
-        // MediaSources: set at playback time via IRequiresMediaInfoCallback, not here (keep hydrated entities lean).
+        // Display-only media source for the host's item info panel: it reads the
+        // *static* (persisted) sources, which for channel items are normally an
+        // empty stub because media info only arrives at playback time via
+        // IRequiresMediaInfoCallback. The source must therefore be safe to persist
+        // and safe to serve statically:
+        //  - Id and Path stay null. The host normalizes the id to the local item
+        //    id (keeps it in the per-user static list) and sets item.Path from the
+        //    first source's path - a stream URL here would persist the remote
+        //    access token and a remote disk path into the local database.
+        //  - Type = Placeholder: the host's playback path filters Placeholder
+        //    sources out (SortMediaSources), so the live source from
+        //    IRequiresMediaInfoCallback stays the only playable source. The info
+        //    panel renders Placeholder sources and their streams.
+        //  - Streams are scrubbed the same way as in MediaSourceMapper: external
+        //    subtitles point at files on the remote disk and are dropped.
+        // Media items only: folders never carry a playable source, and their
+        // ChannelItemInfo.MediaSources must stay empty (the host reads its
+        // first entry for item.Path).
+        if (info.Type == ChannelItemType.Media
+            && info.MediaType is ChannelMediaType.Video or ChannelMediaType.Audio)
+        {
+            info.MediaSources.Add(CreateDisplayMediaSource(dto));
+        }
+
+        // The host persists MediaSources only when (re)creating an item or on
+        // forceUpdate. Items hydrated before the display source existed would
+        // otherwise never pick it up. The host's own "info.DateModified >
+        // item.DateModified" trigger provides a one-shot backfill: the stamp
+        // exceeds every stored date, the first pass stores the stamp, and every
+        // later load compares equal (no-op).
+        info.DateModified = DisplaySourceBackfillStamp;
 
         return info;
+    }
+
+    private static MediaSourceInfo CreateDisplayMediaSource(BaseItemDto dto)
+    {
+        // Prefer the remote item's own media source (from Fields=MediaSources);
+        // it carries the exact container, size and streams the info panel should
+        // show. Fall back to the item-level container when it is absent.
+        var remote = dto.MediaSources?.FirstOrDefault();
+
+        var source = new MediaSourceInfo
+        {
+            Type = MediaSourceType.Placeholder,
+            Container = remote?.Container ?? dto.Container,
+            Size = remote?.Size,
+            RunTimeTicks = remote?.RunTimeTicks ?? dto.RunTimeTicks,
+            // Playability mirrors the dynamic source from MediaSourceMapper so the
+            // display source matches what playback actually offers (direct play is
+            // off there: the client must not open the remote URL itself).
+            SupportsDirectPlay = false,
+            SupportsDirectStream = true,
+            SupportsTranscoding = true
+        };
+
+        var mediaStreams = remote?.MediaStreams ?? dto.MediaStreams;
+
+        if (mediaStreams is not null)
+        {
+            // External subtitle streams point at files on the remote disk and are
+            // dropped (same rule as MediaSourceMapper). Each stream is cloned
+            // before scrubbing so the (host-shared) DTO instance is never mutated.
+            var streams = mediaStreams
+                .Where(s => s.Type != MediaStreamType.Subtitle || !s.IsExternal)
+                .Select(s =>
+                {
+                    var clone = JsonSerializer.Deserialize<MediaStream>(
+                        JsonSerializer.Serialize(s, FederationJsonOptions.Options), FederationJsonOptions.Options)
+                        ?? throw new InvalidOperationException("JSON round-trip of a media stream produced null.");
+
+                    // Remote paths/URLs are unusable from this server and would leak
+                    // the remote disk layout (and token-bearing URLs) through the item
+                    // API, so they are not forwarded.
+                    clone.Path = null;
+                    clone.DeliveryUrl = null;
+                    return clone;
+                })
+                .ToList();
+
+            source.MediaStreams = streams;
+            source.InferTotalBitrate();
+        }
+
+        return source;
     }
 
     private static List<PersonInfo> MapPeople(BaseItemPerson[]? people)
